@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+.env
+
+.vscode/
+.idea/
+*.swp
+
+.DS_Store
+
+data/
+outputs/
+logs/
+checkpoints/
