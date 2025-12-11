@@ -92,7 +92,7 @@ def evaluate(results_file, folder_path):
     eval = {}
     for metric, k in [('recall', 5), ('recall', 20), ('recall', 100), ('ndcg', 5), ('ndcg', 20), ('ndcg', 100)]:
         # e.g. trec_eval/trec_eval QUEST/qrels.test QUEST/predictions_Quest_BM25.test -m recall -M 5
-        cmd = ['trec_eval/trec_eval',
+        cmd = ['./code/evaluation/trec_eval/trec_eval',
                folder_path + 'qrels.test',
                results_file.replace('.jsonl', '.test'),
                '-m', metric,
@@ -138,9 +138,9 @@ def main():
     dataset = args.dataset
 
     if dataset == 'QUEST':
-        folder_path = './QUEST/'
+        folder_path = './data/QUEST/'
     elif dataset == 'QUEST_VAR':
-        folder_path = './QUEST_VAR/'
+        folder_path = './data/QUEST_VAR/'
     else:
         raise ValueError(f'Unknown dataset: {dataset}')
 
