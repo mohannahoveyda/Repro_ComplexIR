@@ -15,6 +15,7 @@ venv/
 .DS_Store
 
 data/
-outputs/
 checkpoints/
 docs/
+NOTES.md
+outputs/runs/toy_run_trec
