@@ -7,9 +7,13 @@ This is the repository for the reproducibility paper "Reproducing Set-Compositio
 
 `torch`
 
+`gritlm` with `pip` --> `transformer version<4.53.3`
+
 Installation: 
 
 `conda create -n retrieval_cpu python=3.10 pytorch torchvision torchaudio cpuonly faiss-cpu sentence-transformers tqdm -c pytorch -c conda-forge`
+
+check reasonir branch 
 
 ## Run Experiments 
 
