@@ -1,6 +1,11 @@
 import json
 import faiss
+import time
 import torch
+import psutil
+import pandas as pd
+from datetime import datetime
+from contextlib import contextmanager
 
 def queries(PATH, quest_plus = False):
     '''
@@ -155,4 +160,59 @@ def search_index(index, query_emb, top_k= 100):
 
     return scores, indices
 
+@contextmanager
+def benchmark(model_name, step_name, log_path="benchmarks.csv"):
+    """
+    Functionality:
 
+        Context manager to benchmark a block of code.
+    
+    Input:
+
+        model_name - name of your model
+        step_name - name of your current step in the pipeline e.g. embedding, search
+        log_path - name for file where we store results
+    
+    Usage:
+
+        with benchmark(MODEL_NAME, STEP_NAME):
+            embeddings = model.encode(texts)
+    """
+    start_time = time.perf_counter()
+    process = psutil.Process()
+    start_mem = process.memory_info().rss / (1024 ** 2) # MB
+    
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    
+    yield # the wrapped code runs here
+    
+    duration = time.perf_counter() - start_time
+    end_mem = process.memory_info().rss / (1024 ** 2)
+    ram_used = end_mem - start_mem
+    
+    if torch.cuda.is_available():
+        gpu_mem = torch.cuda.max_memory_allocated() / (1024 ** 2)
+    else:
+        gpu_mem = 0 
+
+    log_entry = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "model": model_name,
+        "step": step_name,
+        "duration (seconds)": duration,
+        "cpu_usage (MB)": ram_used,
+        "gpu_usage (MB)": gpu_mem
+    }
+    
+    df = pd.DataFrame([log_entry])
+    df.to_csv(log_path, mode='a', index=False, header=not pd.io.common.file_exists(log_path))
+
+
+    print("#"*50)
+    print("#"*50)
+    print()
+    print(f"--- {step_name} Done | Time: {duration:.2f}s | RAM: {ram_used:.1f}MB ---\n")
+    print()
+    print("#"*50)
+    print("#"*50)
