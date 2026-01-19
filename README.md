@@ -7,6 +7,10 @@ This is the repository for the reproducibility paper "Reproducing Set-Compositio
 
 `torch`
 
+Installation: 
+
+`conda create -n retrieval_cpu python=3.10 pytorch torchvision torchaudio cpuonly faiss-cpu sentence-transformers tqdm -c pytorch -c conda-forge`
+
 ## Run Experiments 
 
 
