@@ -3,6 +3,10 @@ This is the repository for the reproducibility paper "Reproducing Set-Compositio
 
 ## Install & Dependencies
 
+`faiss`
+
+`torch`
+
 ## Run Experiments 
 
 
