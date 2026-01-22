@@ -18,6 +18,14 @@ echo "Node: $SLURM_NODELIST"
 echo "Start Time: $(date)"
 echo "=========================================="
 
+# Calculate and check budget before starting
+PROJECT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
+cd "$PROJECT_DIR"
+if [[ -f "$PROJECT_DIR/code/slurm_scripts/calculate_budget.sh" ]]; then
+    source "$PROJECT_DIR/code/slurm_scripts/calculate_budget.sh"
+    echo ""
+fi
+
 # Load modules (adjust based on Snellius setup)
 # Uncomment and modify as needed for your Snellius environment
 # module load Python/3.9.6-GCCcore-11.2.0
@@ -37,9 +45,7 @@ export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 echo "GPU Information:"
 nvidia-smi
 
-# Navigate to project directory (adjust path as needed)
-# Assuming you're running from the project root
-PROJECT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
+# Navigate to project directory (already set above)
 cd "$PROJECT_DIR"
 
 echo "Working directory: $(pwd)"
