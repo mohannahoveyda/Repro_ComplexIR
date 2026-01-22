@@ -19,3 +19,7 @@ checkpoints/
 docs/
 NOTES.md
 outputs/runs/toy_run_trec
+outputs/logs/
+
+*.jsonl
+*.json
