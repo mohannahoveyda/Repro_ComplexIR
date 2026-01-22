@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 """
-Evaluate retrieval results using Recall@k and NDCG@k metrics.
+Evaluate retrieval results directly from JSONL format (matching QUEST evaluation approach).
+
+This script evaluates directly from JSONL files without converting to TREC format,
 
 Reads:
-    - TREC run file: qid Q0 docid rank score run_name
-    - TREC qrels file: qid 0 docid relevance
+    - Run file (JSONL): {"id": "qid", "docs": [...], "scores": [...]}
+    - Qrels file (JSONL): {"id": "qid", "docs": [...]}
 
 Computes:
     - Recall@k for each cutoff k
@@ -19,120 +21,84 @@ from typing import Dict, List, Set
 import numpy as np
 
 
-def load_qrels(qrels_path: str) -> Dict[str, Set[str]]:
+def load_qrels_jsonl(qrels_path: str) -> Dict[str, Set[str]]:
     """
-    Load ground truth from TREC qrels file.
+    Load ground truth from JSONL file.
     
-    Format: qid 0 docid relevance
-    
-    Note: docid may contain spaces, so we parse carefully.
-    We look for: qid, 0, then everything until the last field (relevance).
+    Format: {"id": "qid", "docs": ["doc1", "doc2", ...], ...}
     
     Returns:
         Dict mapping query_id (str) to set of relevant document IDs
     """
-    qrels = defaultdict(set)
+    qrels = {}
     
     with open(qrels_path, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
                 continue
             
-            line = line.strip()
-            parts = line.split()
-            
-            if len(parts) < 4:
-                continue
-            
-            # Ensure query ID is a string (consistent with JSONL evaluation)
-            qid = str(parts[0])
-            # Second field should be "0"
-            if parts[1] != "0":
-                continue
-            
-            # Relevance is the last field
             try:
-                relevance = int(parts[-1])
-            except ValueError:
+                data = json.loads(line)
+                qid = str(data.get("id", ""))
+                docs = data.get("docs", [])
+                
+                if qid:
+                    # Convert all docs to strings and create a set
+                    qrels[qid] = {str(doc) for doc in docs if doc}
+            except json.JSONDecodeError:
                 continue
-            
-            # Docid is everything between parts[2] and parts[-1]
-            # Join with spaces to handle docids with spaces
-            # Ensure docid is a string (consistent with JSONL evaluation)
-            docid = str(" ".join(parts[2:-1]))
-            
-            # Only include documents with positive relevance
-            if relevance > 0:
-                qrels[qid].add(docid)
     
-    return dict(qrels)
+    return qrels
 
 
-def load_trec_run(run_path: str) -> Dict[str, List[tuple]]:
+def load_run_jsonl(run_path: str) -> Dict[str, List[tuple]]:
     """
-    Load TREC run file.
+    Load run file from JSONL format.
     
-    Format: qid Q0 docid rank score run_name
-    
-    Note: docid and run_name may contain spaces, so we parse carefully.
-    We look for: qid, Q0, then docid (until we find rank), rank, score, run_name.
+    Format: {"id": "qid", "docs": [...], "scores": [...], ...}
     
     Returns:
         Dict mapping query_id to list of (doc_id, rank, score) tuples
         sorted by rank (ascending)
     """
-    runs = defaultdict(list)
+    runs = {}
     
     with open(run_path, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
                 continue
             
-            line = line.strip()
-            parts = line.split()
-            
-            if len(parts) < 6:
-                continue
-            
-            # Ensure query ID is a string (consistent with JSONL evaluation)
-            qid = str(parts[0])
-            # Second field should be "Q0"
-            if parts[1] != "Q0":
-                continue
-            
-            # Parse from the END of the line (more reliable when docids contain numbers)
-            # Format: qid Q0 docid rank score run_name
-            # - run_name is the last field
-            # - score is the second-to-last field (must be a float)
-            # - rank is the third-to-last field (must be an integer)
-            # - docid is everything between parts[2] and the rank field
-            
-            if len(parts) < 6:
-                continue
-            
-            # Try to parse score (second-to-last field)
             try:
-                score = float(parts[-2])
-            except (ValueError, IndexError):
+                data = json.loads(line)
+                qid = str(data.get("id", ""))
+                docs = data.get("docs", [])
+                scores = data.get("scores", [])
+                
+                if not qid or len(docs) != len(scores):
+                    continue
+                
+                # Create list of (doc, score) tuples
+                doc_score_pairs = [(str(doc), float(score)) for doc, score in zip(docs, scores) if doc]
+                
+                # Sort by score
+                # Check if all scores are negative
+                all_negative = all(score < 0 for _, score in doc_score_pairs)
+                
+                if all_negative:
+                    # For negative scores: sort ascending (most negative = rank 1)
+                    doc_score_pairs.sort(key=lambda x: x[1], reverse=False)
+                else:
+                    # For positive scores: sort descending (highest = rank 1)
+                    doc_score_pairs.sort(key=lambda x: x[1], reverse=True)
+                
+                # Assign ranks and create tuples
+                ranked_results = [(doc, rank, score) for rank, (doc, score) in enumerate(doc_score_pairs, start=1)]
+                
+                runs[qid] = ranked_results
+            except (json.JSONDecodeError, ValueError, KeyError) as e:
                 continue
-            
-            # Try to parse rank (third-to-last field)
-            try:
-                rank = int(parts[-3])
-            except (ValueError, IndexError):
-                continue
-            
-            # Docid is everything between parts[2] and parts[-3] (before rank)
-            # Ensure docid is a string (consistent with JSONL evaluation)
-            doc_id = str(" ".join(parts[2:-3]))
-            
-            runs[qid].append((doc_id, rank, score))
     
-    # Sort by rank for each query (trust the ranks in the TREC file)
-    for qid in runs:
-        runs[qid].sort(key=lambda x: x[1])
-    
-    return dict(runs)
+    return runs
 
 
 def recall_at_k(retrieved: List[str], relevant: Set[str], k: int) -> float:
@@ -235,9 +201,15 @@ def evaluate(
     if len(query_ids) == 0:
         raise ValueError("No overlapping query IDs between ground truth and run file")
     
+    print(f"[evaluation] Evaluating {len(query_ids)} queries")
+    print(f"[evaluation] Qrels has {len(qrels)} queries, runs has {len(runs)} queries")
+    
     # Initialize metrics
     recall_sums = {k: 0.0 for k in cutoffs}
     ndcg_sums = {k: 0.0 for k in cutoffs}
+    
+    # Track document matching issues
+    doc_match_issues = defaultdict(int)
     
     # Evaluate each query
     for qid in query_ids:
@@ -245,9 +217,22 @@ def evaluate(
         retrieved_items = runs[qid]
         retrieved_docs = [doc_id for doc_id, _, _ in retrieved_items]
         
+        # Check document matching
+        matched_docs = [doc for doc in retrieved_docs if doc in relevant]
+        if len(matched_docs) == 0 and len(relevant) > 0:
+            # Try case-insensitive matching
+            relevant_lower = {doc.lower() for doc in relevant}
+            retrieved_lower = [doc.lower() for doc in retrieved_docs]
+            matched_lower = [doc for doc in retrieved_lower if doc in relevant_lower]
+            if len(matched_lower) > 0:
+                doc_match_issues["case_mismatch"] += 1
+        
         for k in cutoffs:
             recall_sums[k] += recall_at_k(retrieved_docs, relevant, k)
             ndcg_sums[k] += ndcg_at_k(retrieved_docs, relevant, k)
+    
+    if doc_match_issues:
+        print(f"[evaluation] Document matching issues: {dict(doc_match_issues)}")
     
     # Average over queries
     num_queries = len(query_ids)
@@ -261,19 +246,19 @@ def evaluate(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate retrieval results using Recall@k and NDCG@k"
+        description="Evaluate retrieval results directly from JSONL format (QUEST-style)"
     )
     parser.add_argument(
         "--run",
         type=str,
         required=True,
-        help="Path to TREC run file",
+        help="Path to JSONL run file",
     )
     parser.add_argument(
         "--qrels",
         type=str,
         required=True,
-        help="Path to TREC qrels file (qid 0 docid relevance)",
+        help="Path to JSONL qrels file",
     )
     parser.add_argument(
         "--cutoffs",
@@ -291,11 +276,11 @@ def main():
     args = parser.parse_args()
     
     print(f"[evaluation] Loading ground truth from: {args.qrels}")
-    qrels = load_qrels(args.qrels)
+    qrels = load_qrels_jsonl(args.qrels)
     print(f"[evaluation] Loaded {len(qrels)} queries with ground truth")
     
     print(f"[evaluation] Loading run file from: {args.run}")
-    runs = load_trec_run(args.run)
+    runs = load_run_jsonl(args.run)
     print(f"[evaluation] Loaded {len(runs)} queries in run file")
     
     print(f"[evaluation] Evaluating with cutoffs: {args.cutoffs}")
@@ -303,7 +288,7 @@ def main():
     
     # Print results
     print("\n" + "=" * 60)
-    print("Evaluation Results")
+    print("Evaluation Results (Direct JSONL Evaluation)")
     print("=" * 60)
     print(f"\n{'Cutoff':<10} {'Recall@k':<15} {'NDCG@k':<15}")
     print("-" * 60)
@@ -330,4 +315,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
