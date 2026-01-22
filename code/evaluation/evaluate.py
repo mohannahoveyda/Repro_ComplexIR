@@ -279,7 +279,9 @@ def main():
         "--cutoffs",
         type=int,
         nargs="+",
-        default=[1, 5, 10, 20, 50, 100],
+        # default=[1, 5, 10, 20, 50, 100],
+        default=[5, 20, 100],
+
         help="List of cutoff values (k) for evaluation",
     )
     parser.add_argument(
