@@ -3,7 +3,6 @@
 Evaluate retrieval results directly from JSONL format (matching QUEST evaluation approach).
 
 This script evaluates directly from JSONL files without converting to TREC format,
-which may be closer to how QUEST evaluates results.
 
 Reads:
     - Run file (JSONL): {"id": "qid", "docs": [...], "scores": [...]}
