@@ -81,17 +81,6 @@ python code/evaluation/preprocess_run.py \
   --run_name my_run_name
 ```
 
-**Options:**
-- `--input`: Path to input run file (required)
-- `--output`: Path to output TREC run file (default: input path with `_trec` suffix)
-- `--run_name`: Run name to use if not found in input file (default: "run")
-
-**Examples:**
-```bash
-# Convert JSONL to TREC format
-python code/evaluation/preprocess_run.py --input outputs/runs/bm25/test_top100_sample0_2026-01-22_16-45.jsonl --run_name bm25
-```
-
 ---
 
 ### 3. `evaluate.py`
@@ -113,54 +102,11 @@ python code/evaluation/evaluate.py \
   --qrels data/QUEST/test_id_added_qrels
 ```
 
-**Options:**
-- `--run`: Path to TREC run file (required)
-- `--qrels`: Path to TREC qrels file (required)
-- `--cutoffs`: List of cutoff values (k) for evaluation (default: `1 5 10 20 50 100`)
-- `--output`: Optional path to save results as JSON
-
-**Examples:**
-```bash
-# Save results to JSON 
-python code/evaluation/evaluate.py \
-  --run outputs/runs/bm25/test_top100_sample0_2026-01-22_16-45_trec \
-  --qrels data/QUEST/test_id_added_qrels \
-  --output outputs/runs/bm25_test/evaluation_results.json
-```
-
 **Output:**
-The script prints a table with Recall@k and NDCG@k for each cutoff:
-```
-============================================================
-Evaluation Results
-============================================================
-
-Cutoff     Recall@k        NDCG@k         
-------------------------------------------------------------
-1          0.1234          0.1234         
-5          0.2345          0.2345         
-10         0.3456          0.3456         
-...
-============================================================
-```
+The script prints a table with Recall@k and NDCG@k for each cutoff,
 
 If `--output` is specified, results are also saved as JSON:
-```json
-{
-  "cutoffs": [1, 5, 10, 20, 50],
-  "recall": {
-    "1": 0.1234,
-    "5": 0.2345,
-    ...
-  },
-  "ndcg": {
-    "1": 0.1234,
-    "5": 0.2345,
-    ...
-  },
-  "num_queries": 1727
-}
-```
+
 
 ---
 
@@ -170,21 +116,11 @@ Here's a complete example of evaluating retrieval results:
 
 ```bash
 # Step 1: Preprocess ground truth (if not already done)
-python code/evaluation/preprocess_qrels.py \
-  --input data/QUEST/test.jsonl \
-  --output data/QUEST/test_id_added_qrels
 
 # Step 2: Preprocess retrieval results
-python code/evaluation/preprocess_run.py \
-  --input outputs/runs/bm25_test/test_top50_sample0_2025-01-03_17-44.jsonl \
-  --run_name bm25_temptest
 
 # Step 3: Evaluate
-python code/evaluation/evaluate.py \
-  --run outputs/runs/bm25_test/test_top50_sample0_2025-01-03_17-44_trec \
-  --qrels data/QUEST/test_id_added_qrels \
-  --cutoffs 1 5 10 20 50 \
-  --output outputs/runs/bm25_test/evaluation_results.json
+
 ```
 
 ---
@@ -215,17 +151,5 @@ qid Q0 docid rank score run_name
 - **Query ID Matching**: The evaluation script only evaluates queries that appear in both the run file and qrels file. Query IDs must match exactly.
 - **Negative Scores**: When all scores for a query are negative, they are sorted in ascending order (most negative = best rank).
 - **Document ID Matching**: Document IDs are matched exactly as strings, so ensure consistent formatting between run and qrels files.
-- **Missing Queries**: If a query appears in the run file but not in qrels, it is skipped. If a query appears in qrels but not in run, it is also skipped.
+- **Missing Queries**: If a query appears in the run file but not in qrels, it is skipped and the other way around.
 
----
-
-## Troubleshooting
-
-**Issue**: "No overlapping query IDs between ground truth and run file"
-- **Solution**: Check that query IDs in both files match exactly (same format, no extra whitespace)
-
-**Issue**: "Skipping malformed line" warnings in preprocess_run.py
-- **Solution**: Check that your input file format matches one of the supported formats. For JSONL, ensure each line is valid JSON with `id`, `docs`, and `scores` fields.
-
-**Issue**: Low recall/NDCG scores
-- **Solution**: Verify that document IDs in your run file match exactly with document IDs in the qrels file (case-sensitive, including spaces and special characters)
