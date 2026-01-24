@@ -20,3 +20,7 @@ docs/
 NOTES.md
 outputs/runs/toy_run_trec
 code/testing/
+
+outputs/logs/
+*.json
+*.jsonl
