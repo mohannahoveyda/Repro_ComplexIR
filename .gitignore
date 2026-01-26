@@ -19,7 +19,12 @@ checkpoints/
 docs/
 NOTES.md
 outputs/runs/toy_run_trec
-outputs/logs/
+code/testing/
 
-*.jsonl
+outputs/logs/
 *.json
+*.jsonl
+
+.archived/
+code/baselines/reasonir_repo/
+outputs/runs/reasonir-8b/
