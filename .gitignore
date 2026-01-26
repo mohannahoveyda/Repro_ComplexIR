@@ -24,3 +24,7 @@ code/testing/
 outputs/logs/
 *.json
 *.jsonl
+
+.archived/
+code/baselines/reasonir_repo/
+outputs/runs/reasonir-8b/
