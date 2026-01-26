@@ -5,6 +5,7 @@ import torch
 import psutil
 import pandas as pd
 from datetime import datetime
+from datasets import load_dataset
 from contextlib import contextmanager
 
 def queries(PATH, quest_plus = False):
@@ -71,6 +72,63 @@ def documents(PATH, quest_plus = False):
             texts.append(item.get(t_key))
             title_map[str_id] = item.get(m_key)
     
+    return ids, texts, title_map
+
+def queries_limit():
+    '''
+        Functionality:
+
+            load the limit dataset queries
+
+        Input:
+
+            None
+
+        Usage:
+
+            query, ground_truths = queries_limit()
+    '''
+    qs = load_dataset("orionweller/LIMIT", "queries")["queries"]
+    gt = load_dataset("orionweller/LIMIT", "default")["test"]
+
+    q_ids = qs["_id"]
+    qS = qs["text"]
+
+    truth_map = {}
+    for row in gt:
+        qid = row["query-id"]
+        cid = row["corpus-id"]
+        
+        if qid not in truth_map:
+            truth_map[qid] = []
+    
+        if row.get("score", 1) > 0:
+            truth_map[qid].append(cid)
+
+    truth = [truth_map.get(qid, []) for qid in q_ids]
+
+    return qS, truth
+
+def documents_limit():
+    '''
+        Functionality:
+
+            load the limit dataset documents
+
+        Input:
+
+            None
+
+        Usage:
+
+            doc_ids, doc_texts, doc_title_map = documents_limit()
+    '''
+    ds = load_dataset("orionweller/LIMIT", "corpus")["corpus"]
+
+    ids = ds["_id"]
+    texts = ds["text"]
+    title_map = {row["_id"]: row.get("title", "") for row in ds} 
+
     return ids, texts, title_map
 
 def start_retrieval(PATH, qS, truth, doc_ids, title_map, top_indices, top_scores):
