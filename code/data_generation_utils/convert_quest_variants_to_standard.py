@@ -20,11 +20,11 @@ Output format (standard QUEST):
     "scores": null,
     "metadata": {
         "domain": "...",
+        "queries": [...],
+        "operators": [...],
         ...
     },
-    "id": ...,
-    "queries": [...],
-    "operators": [...]
+    "id": ...
 }
 """
 
@@ -69,7 +69,8 @@ def convert_example(variant_example: Dict[str, Any], example_id: int) -> Dict[st
     else:
         original_query = query  # Fallback to nl_query if no queries list
     
-    # Build metadata
+    # Build metadata - include queries and operators as extra fields
+    # These will be preserved in JSON but may be ignored by ExampleMetadata dataclass
     metadata = {
         "domain": variant_example.get("domain", None),
         "template": None,
@@ -78,7 +79,9 @@ def convert_example(variant_example: Dict[str, Any], example_id: int) -> Dict[st
         "naturalness": None,
         "relevance_ratings": None,
         "evidence_ratings": None,
-        "attributions": None
+        "attributions": None,
+        "queries": queries_list,  # Store queries in metadata
+        "operators": operators_list  # Store operators in metadata
     }
     
     # Create standard format example
@@ -88,9 +91,7 @@ def convert_example(variant_example: Dict[str, Any], example_id: int) -> Dict[st
         "original_query": original_query,
         "scores": None,
         "metadata": metadata,
-        "id": example_id,
-        "queries": queries_list,  # Preserve original queries list
-        "operators": operators_list  # Preserve original operators list
+        "id": example_id
     }
     
     return standard_example

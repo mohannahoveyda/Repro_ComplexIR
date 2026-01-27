@@ -18,8 +18,7 @@ echo "Node: $SLURM_NODELIST"
 echo "Start Time: $(date)"
 echo "=========================================="
 
-# Load modules (adjust based on Snellius setup)
-# Uncomment and modify based on your Snellius environment
+# Uncomment and modify based on the environment
 # module load Python/3.10.4-GCCcore-11.3.0
 # module load CUDA/11.7.0
 # module load cuDNN/8.4.1.50-CUDA-11.7.0
@@ -59,17 +58,12 @@ export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,expandable_segments:True
 source $HOME/anaconda3/etc/profile.d/conda.sh
 conda activate reasonir
 
-# Workaround for tokenizer loading issue: update tokenizers if needed
-# The error "data did not match any variant of untagged enum ModelWrapper" 
-# can occur with incompatible tokenizers library versions
 # Uncomment the following line if you encounter tokenizer errors:
 # pip install --upgrade tokenizers --quiet
 
-# Print GPU information
 echo "GPU Information:"
 nvidia-smi
 
-# Print Python and package versions
 echo "Python version: $(python --version)"
 echo "PyTorch version: $(python -c 'import torch; print(torch.__version__)')"
 echo "CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())')"
@@ -79,7 +73,6 @@ if python -c 'import torch; print(torch.cuda.is_available())' | grep -q True; th
     echo "GPU name: $(python -c 'import torch; print(torch.cuda.get_device_name(0))')"
 fi
 
-# Navigate to project root
 cd $HOME/SIGIR_2026/SIGIR26_Repro_ComplexIR
 
 # Set default paths (modify as needed)
@@ -89,16 +82,15 @@ OUTPUT_FILE="${OUTPUT_FILE:-./outputs/runs/reasonir-8b/results_$(date +%Y%m%d_%H
 BATCH_SIZE="${BATCH_SIZE:-64}"  # Batch size for queries (optimized: 32-128 for A100)
 DOC_BATCH_SIZE="${DOC_BATCH_SIZE:-32}"  # Batch size for documents (can be smaller for large corpora)
 
-# New optimization options
 USE_CACHE="${USE_CACHE:-1}"  # Enable caching by default (set to 0 to disable)
 CACHE_DIR="${CACHE_DIR:-}"  # Cache directory (default: auto-generated)
 USE_FAISS="${USE_FAISS:-1}"  # Use FAISS by default (set to 0 for direct computation)
 MAX_LENGTH="${MAX_LENGTH:-4096}"  # Maximum sequence length
 
-# Quick run options (for sanity checking)
-QUICK_RUN="${QUICK_RUN:-0}"  # Enable quick run mode (default: disabled)
-QUICK_DOCS="${QUICK_DOCS:-100}"  # Number of documents in quick run (default: 100)
-QUICK_QUERIES="${QUICK_QUERIES:-10}"  # Number of queries in quick run (default: 10)
+
+# explicit limits for docs/queries (preferred over QUICK_RUN)
+MAX_DOCS="${MAX_DOCS:-}"          # If set, limit to first N documents
+MAX_QUERIES="${MAX_QUERIES:-}"    # If set, limit to first N queries
 
 # Performance optimization options
 AUTO_BATCH="${AUTO_BATCH:-0}"  # Auto-tune batch sizes (default: disabled)
@@ -121,6 +113,9 @@ echo "Max length: $MAX_LENGTH"
 if [ "$QUICK_RUN" = "1" ]; then
     echo "QUICK RUN MODE: Enabled (${QUICK_DOCS} docs, ${QUICK_QUERIES} queries)"
 fi
+if [ -n "$MAX_DOCS" ] || [ -n "$MAX_QUERIES" ]; then
+    echo "SUBSET MODE: max_docs=${MAX_DOCS:-ALL}, max_queries=${MAX_QUERIES:-ALL}"
+fi
 if [ "$AUTO_BATCH" = "1" ]; then
     echo "AUTO BATCH TUNING: Enabled"
 fi
@@ -128,6 +123,9 @@ if [ "$USE_MULTIGPU" = "1" ]; then
     echo "MULTI-GPU MODE: Enabled (using all available GPUs)"
 fi
 echo "INSPECT_BATCHES: ${INSPECT_BATCHES:-not set}"
+if [ -n "$MAX_DOCS" ] || [ -n "$MAX_QUERIES" ]; then
+    echo "SUBSET: MAX_DOCS=$MAX_DOCS MAX_QUERIES=$MAX_QUERIES"
+fi
 echo "=========================================="
 
 # Build command with optional arguments
@@ -147,7 +145,17 @@ CMD="python code/baselines/reasonir/reasonir-8b.py \
 [ "$USE_CACHE" = "0" ] && CMD="$CMD --no-cache"
 [ -n "$CACHE_DIR" ] && CMD="$CMD --cache-dir \"$CACHE_DIR\""
 [ "$USE_FAISS" = "0" ] && CMD="$CMD --no-faiss"
-[ "$QUICK_RUN" = "1" ] && CMD="$CMD --quick-run --quick-docs \"$QUICK_DOCS\" --quick-queries \"$QUICK_QUERIES\""
+# Map subset controls to new Python arguments
+if [ -n "$MAX_DOCS" ]; then
+    CMD="$CMD --max-docs \"$MAX_DOCS\""
+elif [ "$QUICK_RUN" = "1" ]; then
+    CMD="$CMD --max-docs \"$QUICK_DOCS\""
+fi
+if [ -n "$MAX_QUERIES" ]; then
+    CMD="$CMD --max-queries \"$MAX_QUERIES\""
+elif [ "$QUICK_RUN" = "1" ]; then
+    CMD="$CMD --max-queries \"$QUICK_QUERIES\""
+fi
 [ "$AUTO_BATCH" = "1" ] && CMD="$CMD --auto-batch"
 [ "$USE_MULTIGPU" = "1" ] && CMD="$CMD --multigpu"
 
