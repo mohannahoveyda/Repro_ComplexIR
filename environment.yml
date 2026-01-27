@@ -1,0 +1,15 @@
+name: sigir26_repro_py39
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - numpy=1.26.4
+  - scipy=1.10.1
+  - pip
+  - setuptools=69.5.1
+  - pip:
+    - rank-bm25
+    - nltk
+    - tqdm
+
