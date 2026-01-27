@@ -1,3 +1,0 @@
-timestamp,model,step,duration (seconds),cpu_usage (MB),gpu_usage (MB)
-2026-01-26 17:22:58,reasonir/ReasonIR-8B,Embedding,56.281623512972146,417.4921875,20736.2080078125
-2026-01-26 17:32:06,reasonir/ReasonIR-8B,Embedding,0.005263115046545863,0.0,14314.52392578125

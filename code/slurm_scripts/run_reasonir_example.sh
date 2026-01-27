@@ -8,7 +8,7 @@ export CORPUS_FILE="./data/QUEST/documents.jsonl"
 export OUTPUT_FILE="./outputs/runs/reasonir-8b/results_$(date +%Y%m%d_%H%M%S).jsonl"
 export BATCH_SIZE=16  
 export DOC_BATCH_SIZE=32  # Separate batch size for documents (can be smaller for large corpora)
-export INSPECT_BATCHES=1  # Set to 1 to inspect batches
+export INSPECT_BATCHES=0  # Set to 1 to inspect batches
 
 # Optional: set quest_plus mode
 # export QUEST_PLUS=1
@@ -28,17 +28,15 @@ export INSPECT_BATCHES=1  # Set to 1 to inspect batches
 # Optional: Maximum sequence length
 # export MAX_LENGTH=32768  # Default: 32768
 
-# Optional: Quick run mode (for sanity checking - uses first 100 docs and 10 queries)
-# export QUICK_RUN=1  # Enable quick run mode
-# export QUICK_DOCS=100  # Number of documents (default: 100)
-# export QUICK_QUERIES=10  # Number of queries (default: 10)
+# explicitly set hard limits (preferred for debugging)
+# export MAX_DOCS=1000
+# export MAX_QUERIES=100
 
 # Optional: Performance optimizations
 export AUTO_BATCH=0  # Auto-tune batch sizes based on GPU memory (recommended!)
 export USE_MULTIGPU=1  # Use multiple GPUs if available (requires --gres=gpu:2 in SLURM)
 
-# --export=ALL passes all environment variables
-sbatch --export=ALL code/slurm_scripts/reasonir_8b_gpu.sh
+sbatch --export=ALL,MAX_DOCS=$MAX_DOCS,MAX_QUERIES=$MAX_QUERIES code/slurm_scripts/reasonir_8b_gpu.sh
 
 echo "=========================================="
 echo "Job submitted with environment variables:"
@@ -60,6 +58,10 @@ if [ "${AUTO_BATCH:-0}" = "1" ]; then
 fi
 if [ "${USE_MULTIGPU:-0}" = "1" ]; then
     echo "  USE_MULTIGPU: Enabled (will use all available GPUs)"
+fi
+if [ -n "${MAX_DOCS}" ] || [ -n "${MAX_QUERIES}" ]; then
+    echo "  MAX_DOCS=${MAX_DOCS:-'(not set)'}"
+    echo "  MAX_QUERIES=${MAX_QUERIES:-'(not set)'}"
 fi
 echo "=========================================="
 echo ""
