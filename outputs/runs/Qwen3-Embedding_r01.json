@@ -1,0 +1,4 @@
+{
+  "library": "faiss",
+  "index": "indexflatip"
+}
