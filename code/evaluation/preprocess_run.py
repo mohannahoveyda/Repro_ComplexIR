@@ -2,7 +2,10 @@
 Preprocess a run file to ensure it's in proper TREC format.
 
 Reads:
-    Run file (may be in various formats)
+    - TREC/TSV/space-separated run lines
+    - JSONL with "id", "docs", "scores" (one object per query)
+    - ReasonIR JSONL: "query", "relevant", "retrieved" (list of {rank, score, title});
+      qid is line number (1-based) to match test_id_added.jsonl order
 
 Writes:
     TREC run file with format: qid Q0 docid rank score run_name
@@ -20,6 +23,48 @@ import json
 import os
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
+
+
+def parse_reasonir_jsonl_line(line: str, line_num: int) -> Optional[List[Tuple[str, str, float]]]:
+    """
+    Parse a ReasonIR JSONL line (one object per query).
+    
+    Expected format:
+    {
+        "query": "...",
+        "relevant": ["doc1", ...],
+        "retrieved": [{"rank": 1, "score": 0.42, "title": "Doc Title"}, ...]
+    }
+    
+    qid is taken as line_num (1-based) so order matches test_id_added.jsonl.
+    
+    Returns:
+        List of (qid, docid, score) tuples or None if parsing fails
+    """
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        data = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    retrieved = data.get("retrieved", [])
+    if not retrieved or not isinstance(retrieved, list):
+        return None
+    qid = str(line_num)
+    out = []
+    for item in retrieved:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        score = item.get("score", 0.0)
+        if title is None or title == "":
+            continue
+        try:
+            out.append((qid, str(title), float(score)))
+        except (TypeError, ValueError):
+            continue
+    return out if out else None
 
 
 def parse_jsonl_line(line: str) -> Optional[List[Tuple[str, str, float]]]:
@@ -45,6 +90,10 @@ def parse_jsonl_line(line: str) -> Optional[List[Tuple[str, str, float]]]:
         data = json.loads(line)
     except json.JSONDecodeError:
         return None
+    
+    # ReasonIR format: "retrieved" with rank/score/title (handled separately with line_num)
+    if "retrieved" in data and isinstance(data.get("retrieved"), list):
+        return None  # Let parse_reasonir_jsonl_line handle it
     
     # Extract query ID
     qid = str(data.get("id", ""))
@@ -164,15 +213,19 @@ def preprocess_run(input_path: str, output_path: str, default_run_name: str = "r
     
     # Detect if file is JSONL format by checking first line
     is_jsonl = False
+    is_reasonir = False
     try:
         with open(input_path, "r", encoding="utf-8") as infile:
             first_line = infile.readline().strip()
             if first_line:
                 try:
                     data = json.loads(first_line)
-                    # Check if it has the expected JSONL structure
-                    if isinstance(data, dict) and ("docs" in data or "scores" in data):
-                        is_jsonl = True
+                    if isinstance(data, dict):
+                        if "retrieved" in data and isinstance(data.get("retrieved"), list):
+                            is_reasonir = True
+                            is_jsonl = True
+                        elif "docs" in data or "scores" in data:
+                            is_jsonl = True
                 except (json.JSONDecodeError, ValueError):
                     pass
     except Exception:
@@ -180,8 +233,14 @@ def preprocess_run(input_path: str, output_path: str, default_run_name: str = "r
     
     with open(input_path, "r", encoding="utf-8") as infile:
         for line_num, line in enumerate(infile, start=1):
+            if is_reasonir:
+                parsed_list = parse_reasonir_jsonl_line(line, line_num)
+                if parsed_list is not None:
+                    for qid, docid, score in parsed_list:
+                        results[qid].append((docid, score, default_run_name))
+                    continue
             if is_jsonl:
-                # Try parsing as JSONL first
+                # Try parsing as JSONL (id/docs/scores) first
                 parsed_list = parse_jsonl_line(line)
                 if parsed_list is not None:
                     for qid, docid, score in parsed_list:
@@ -200,9 +259,16 @@ def preprocess_run(input_path: str, output_path: str, default_run_name: str = "r
             
             results[qid].append((docid, score, run_name))
     
+    # Sort qids: numeric when possible (e.g. ReasonIR 1,2,...,1727), else string
+    def qid_sort_key(q):
+        try:
+            return (0, int(q))
+        except ValueError:
+            return (1, q)
+
     # Sort by score (descending) for each query and write output
     with open(output_path, "w", encoding="utf-8") as outfile:
-        for qid in sorted(results.keys()):
+        for qid in sorted(results.keys(), key=qid_sort_key):
             query_results = results[qid]
             
             # Determine if scores are negative (more negative = better)

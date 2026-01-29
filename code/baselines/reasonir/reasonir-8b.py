@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import math
 import multiprocessing as mp
 from multiprocessing import Process, Queue
+import tempfile
 
 # Set multiprocessing start method to 'spawn' for CUDA isolation
 # This ensures each process has its own CUDA context
@@ -102,7 +103,7 @@ def auto_tune_batch_size(model, texts, device, max_length, start_batch=32, max_b
     
     return optimal_batch
 
-def encode_worker(gpu_id, model_name, model_kwargs, texts_chunk, instruction, batch_size, max_length, result_queue):
+def encode_worker(gpu_id, model_name, model_kwargs, texts_chunk, instruction, batch_size, max_length, result_queue, temp_dir):
     """Worker function for multiprocessing: loads model on specific GPU and encodes texts.
     
     This runs in a separate process with its own CUDA context, preventing memory conflicts.
@@ -135,20 +136,41 @@ def encode_worker(gpu_id, model_name, model_kwargs, texts_chunk, instruction, ba
         memory_used = torch.cuda.memory_allocated(0) / 1024**3
         print(f"[GPU {gpu_id} Process] Model loaded (memory: {memory_used:.2f} GB)")
         
-        # Encode texts
-        print(f"[GPU {gpu_id} Process] Encoding {len(texts_chunk)} texts...")
+        # Encode texts in batches with our own tqdm so progress is always visible
+        # (model.encode()'s internal tqdm can be sparse or in-place for small batch counts, e.g. queries)
+        import numpy as np
+        n_batches = (len(texts_chunk) + batch_size - 1) // batch_size
+        print(f"[GPU {gpu_id} Process] Encoding {len(texts_chunk)} texts in {n_batches} batch(es)...")
+        emb_list = []
         with torch.inference_mode():
-            embeddings = model.encode(
-                texts_chunk,
-                instruction=instruction,
-                batch_size=batch_size,
-                max_length=max_length
-            )
+            for start in tqdm(
+                range(0, len(texts_chunk), batch_size),
+                desc=f"[GPU {gpu_id}] Batches",
+                total=n_batches,
+                unit="batch",
+                file=sys.stderr,
+            ):
+                batch_texts = texts_chunk[start : start + batch_size]
+                emb = model.encode(
+                    batch_texts,
+                    instruction=instruction,
+                    batch_size=len(batch_texts),
+                    max_length=max_length,
+                )
+                emb_list.append(emb.cpu().numpy() if hasattr(emb, "cpu") else emb)
+        embeddings = np.concatenate(emb_list, axis=0)
         
         print(f"[GPU {gpu_id} Process] Encoded -> shape {embeddings.shape}")
         
-        # Put result in queue
-        result_queue.put((gpu_id, embeddings))
+        # Save embeddings to a temporary file for this worker to avoid sending
+        # large arrays through the multiprocessing.Queue (which would require
+        # pickling and large IPC transfers).
+        os.makedirs(temp_dir, exist_ok=True)
+        shard_path = os.path.join(temp_dir, f"gpu_{gpu_id}.npy")
+        np.save(shard_path, embeddings)
+        
+        # Put only metadata (gpu_id, filename) in the queue
+        result_queue.put((gpu_id, shard_path))
         
         # Cleanup
         del model
@@ -196,8 +218,11 @@ def encode_with_multigpu(model_name, model_kwargs, texts, instruction, batch_siz
     # Each process gets its own CUDA context, preventing memory conflicts
     print(f"Starting {num_gpus} parallel processes (one per GPU)...")
     
-    # Create queue for results
+    # Create queue for results (metadata only) and a temporary directory for
+    # per-GPU embedding files. This avoids pushing large arrays through the
+    # queue, which would require expensive pickling and IPC.
     result_queue = Queue()
+    temp_dir = tempfile.mkdtemp(prefix="reasonir_mgpu_")
     processes = []
     
     # Start a process for each GPU
@@ -208,28 +233,40 @@ def encode_with_multigpu(model_name, model_kwargs, texts, instruction, batch_siz
         print(f"  Starting process for GPU {gpu_id} ({len(chunks[gpu_id])} texts)...")
         p = Process(
             target=encode_worker,
-            args=(gpu_id, model_name, model_kwargs, chunks[gpu_id], instruction, batch_size, max_length, result_queue)
+            args=(gpu_id, model_name, model_kwargs, chunks[gpu_id], instruction, batch_size, max_length, result_queue, temp_dir)
         )
         p.start()
         processes.append((gpu_id, p))
     
-    # Collect results from all processes
+    # Collect results from all processes.
+    # Drain the queue first, then join. Otherwise we can deadlock: the parent blocks on
+    # p.join() while a child blocks on result_queue.put() (queue full with large arrays).
     results_dict = {}
-    for gpu_id, p in processes:
-        gpu_id_result, embeddings = result_queue.get()
-        if embeddings is not None:
-            results_dict[gpu_id_result] = embeddings
-            print(f"  GPU {gpu_id_result}: Received embeddings shape {embeddings.shape}")
+    for _ in range(len(processes)):
+        gpu_id_result, shard_path = result_queue.get()
+        if shard_path is not None:
+            results_dict[gpu_id_result] = shard_path
+            print(f"  GPU {gpu_id_result}: Wrote embeddings to {shard_path}")
         else:
             raise RuntimeError(f"GPU {gpu_id_result} process failed!")
-        p.join()  # Wait for process to finish
-        print(f"  GPU {gpu_id_result}: Process completed")
+    for gpu_id, p in processes:
+        p.join()
+        print(f"  GPU {gpu_id}: Process completed")
     
     # Concatenate results in order
     if results_dict:
-        results = [results_dict[i] for i in range(num_gpus) if i in results_dict]
-        final_emb = np.concatenate(results, axis=0)
-        print(f"Combined embeddings from {num_gpus} GPUs: {final_emb.shape}")
+        # Load per-GPU shards from disk in gpu_id order
+        loaded = []
+        for i in range(num_gpus):
+            if i in results_dict:
+                shard_path = results_dict[i]
+                emb = np.load(shard_path, allow_pickle=True)
+                loaded.append(emb)
+        if loaded:
+            final_emb = np.concatenate(loaded, axis=0)
+            print(f"Combined embeddings from {len(loaded)} GPUs: {final_emb.shape}")
+        else:
+            final_emb = np.array([])
         return final_emb
     else:
         return np.array([])
@@ -237,7 +274,7 @@ def encode_with_multigpu(model_name, model_kwargs, texts, instruction, batch_siz
 def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None, 
          model_name=None, index_name=None, device=None, batch_size=32, doc_batch_size=None, 
          use_fp16=True, use_cache=True, cache_dir=None, use_faiss=True, max_length=32768, 
-         quick_run=False, quick_docs=100, quick_queries=10, auto_batch=False, use_multigpu=False):
+         auto_batch=False, use_multigpu=False, max_docs=None, max_queries=None):
     # Debug: Check INSPECT_BATCHES environment variable early
     inspect_env = os.getenv("INSPECT_BATCHES", "0")
     print(f"[DEBUG] At start of main(), INSPECT_BATCHES = '{inspect_env}'")
@@ -249,8 +286,6 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
     if cache_dir is None:
         cache_dir = os.path.join(os.path.dirname(output_file) if output_file else ".", "cache") if use_cache else None
     task_name = "quest_plus" if quest_plus else "quest"
-    if quick_run:
-        task_name = f"{task_name}_quick"  # Separate cache for quick runs
     
     # Set device
     if device is None:
@@ -282,8 +317,6 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
         print(f"Cache directory: {cache_dir}")
     print(f"Using FAISS: {use_faiss}")
     print(f"Auto batch tuning: {auto_batch}")
-    if quick_run:
-        print(f"QUICK RUN MODE: Using first {quick_docs} documents and first {quick_queries} queries")
 
     if quest_plus:
         QUERY_FILE = query_file if query_file else "./data/QUEST_w_Varients/quest_test_withVarients.jsonl"
@@ -313,27 +346,29 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
     # print(f"Max tokens: {max(doc_lengths)}")
     # print(f"Mean tokens: {sum(doc_lengths)/len(doc_lengths):.0f}")
     # print(f"95th percentile: {sorted(doc_lengths)[int(0.95*len(doc_lengths))]}")
-    # Quick run: limit to first N documents
-    if quick_run:
-        doc_ids = doc_ids[:quick_docs]
-        doc_texts = doc_texts[:quick_docs]
-        # Filter doc_title_map to only include the limited doc_ids
-        doc_title_map = {doc_id: doc_title_map[doc_id] for doc_id in doc_ids if doc_id in doc_title_map}
-        print(f"QUICK RUN: Limited to first {len(doc_ids)} documents")
-    
     # inspecting how doc_ids, doc_texts, doc_title_map are structured
     print(f"doc_ids: {doc_ids[:3]}")
     print(f"doc_title_map (first 3): {dict(list(doc_title_map.items())[:3])}")
 
+    # Optionally limit number of documents for smaller debug runs
+    if max_docs is not None and max_docs > 0 and max_docs < len(doc_ids):
+        print(f"[DEBUG] Reducing documents from {len(doc_ids)} to first {max_docs}")
+        doc_ids = doc_ids[:max_docs]
+        doc_texts = doc_texts[:max_docs]
+        # Restrict title map to kept doc_ids
+        doc_title_map = {doc_id: doc_title_map.get(doc_id) for doc_id in doc_ids}
+        print(f"[DEBUG] Documents after reduction: {len(doc_ids)}")
+
     print("Collecting queries...")
     query, ground_truths = tools.queries(QUERY_FILE, quest_plus)
     print(f"Total queries loaded: {len(query)}")
-    
-    # Quick run: limit to first N queries
-    if quick_run:
-        query = query[:quick_queries]
-        ground_truths = ground_truths[:quick_queries]
-        print(f"QUICK RUN: Limited to first {len(query)} queries")
+
+    # Optionally limit number of queries for smaller debug runs
+    if max_queries is not None and max_queries > 0 and max_queries < len(query):
+        print(f"[DEBUG] Reducing queries from {len(query)} to first {max_queries}")
+        query = query[:max_queries]
+        ground_truths = ground_truths[:max_queries]
+        print(f"[DEBUG] Queries after reduction: {len(query)}")
     
     # inspecting how query, ground_truths are structured
     print(f"query: {query[:3]}")
@@ -442,25 +477,74 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
         # Inspect document batches if enabled
         inspect_batch_samples(doc_texts, doc_batch_size, name="documents")
         
-        # Encode documents with caching
+        # Encode documents with caching (support sharded caching so we can resume)
         if use_cache and doc_cache_file and os.path.isfile(doc_cache_file):
             print(f"Loading cached document embeddings from {doc_cache_file}")
             doc_emb = np.load(doc_cache_file, allow_pickle=True)
         else:
-            print(f"Encoding {len(doc_texts)} documents...")
-            if use_multigpu and num_gpus > 1:
-                doc_emb = encode_with_multigpu(MODEL_NAME, model_kwargs, doc_texts, doc_instruction, doc_batch_size, max_length, num_gpus)
+            # If we have a cache directory, use sharded caching so that each chunk
+            # is saved as we go. This allows resuming long runs without recomputing
+            # already-encoded chunks.
+            DOC_SHARD_SIZE = 10000  # number of docs per shard; smaller = better resume granularity
+            use_sharded_doc_cache = use_cache and cache_dir is not None and len(doc_texts) > DOC_SHARD_SIZE
+            if use_sharded_doc_cache:
+                doc_shard_dir = os.path.join(doc_cache_dir, "shards")
+                os.makedirs(doc_shard_dir, exist_ok=True)
+                print(f"[DEBUG] Using sharded document cache in {doc_shard_dir} with shard_size={DOC_SHARD_SIZE}")
+                doc_emb_chunks = []
+                total_docs = len(doc_texts)
+                for start_idx in range(0, total_docs, DOC_SHARD_SIZE):
+                    end_idx = min(start_idx + DOC_SHARD_SIZE, total_docs)
+                    shard_path = os.path.join(doc_shard_dir, f"emb_{start_idx:07d}_{end_idx:07d}.npy")
+                    if os.path.isfile(shard_path):
+                        print(f"Loading cached document shard {start_idx}-{end_idx-1} from {shard_path}")
+                        emb_chunk = np.load(shard_path, allow_pickle=True)
+                    else:
+                        print(f"Encoding document shard {start_idx}-{end_idx-1} ({end_idx-start_idx} docs)...")
+                        shard_texts = doc_texts[start_idx:end_idx]
+                        if use_multigpu and num_gpus > 1:
+                            emb_chunk = encode_with_multigpu(
+                                MODEL_NAME,
+                                model_kwargs,
+                                shard_texts,
+                                doc_instruction,
+                                doc_batch_size,
+                                max_length,
+                                num_gpus,
+                            )
+                        else:
+                            with torch.inference_mode():
+                                emb_chunk = model.encode(
+                                    shard_texts,
+                                    instruction=doc_instruction,
+                                    batch_size=doc_batch_size,
+                                    max_length=max_length,
+                                )
+                        if use_cache:
+                            print(f"Saving document shard {start_idx}-{end_idx-1} to cache: {shard_path}")
+                            np.save(shard_path, emb_chunk)
+                    doc_emb_chunks.append(emb_chunk)
+                doc_emb = np.concatenate(doc_emb_chunks, axis=0)
+                print(f"[DEBUG] Finished document encoding; doc_emb shape: {doc_emb.shape}")
+                if use_cache and doc_cache_file:
+                    print(f"Saving combined document embeddings to cache: {doc_cache_file}")
+                    np.save(doc_cache_file, doc_emb)
             else:
-                with torch.inference_mode():
-                    doc_emb = model.encode(
-                        doc_texts,
-                        instruction=doc_instruction,
-                        batch_size=doc_batch_size,
-                        max_length=max_length
-                    )
-            if use_cache and doc_cache_file:
-                print(f"Saving document embeddings to cache: {doc_cache_file}")
-                np.save(doc_cache_file, doc_emb)
+                print(f"Encoding {len(doc_texts)} documents...")
+                if use_multigpu and num_gpus > 1:
+                    doc_emb = encode_with_multigpu(MODEL_NAME, model_kwargs, doc_texts, doc_instruction, doc_batch_size, max_length, num_gpus)
+                else:
+                    with torch.inference_mode():
+                        doc_emb = model.encode(
+                            doc_texts,
+                            instruction=doc_instruction,
+                            batch_size=doc_batch_size,
+                            max_length=max_length
+                        )
+                print(f"[DEBUG] Finished document encoding; doc_emb shape: {doc_emb.shape}")
+                if use_cache and doc_cache_file:
+                    print(f"Saving document embeddings to cache: {doc_cache_file}")
+                    np.save(doc_cache_file, doc_emb)
         
         # Clear GPU cache between document and query encoding
         if device == "cuda":
@@ -469,32 +553,81 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
         # Inspect query batches if enabled
         inspect_batch_samples(query, batch_size, name="queries")
         
-        # Encode queries with caching
+        # Encode queries with caching (queries are smaller, but mirror sharded logic for robustness)
         if use_cache and query_cache_file and os.path.isfile(query_cache_file):
             print(f"Loading cached query embeddings from {query_cache_file}")
             query_emb = np.load(query_cache_file, allow_pickle=True)
         else:
-            print(f"Encoding {len(query)} queries...")
-            if use_multigpu and num_gpus > 1:
-                query_emb = encode_with_multigpu(MODEL_NAME, model_kwargs, query, query_instruction, batch_size, max_length, num_gpus)
+            QUERY_SHARD_SIZE = 2000  # safe default; larger than typical query counts here
+            use_sharded_query_cache = use_cache and cache_dir is not None and len(query) > QUERY_SHARD_SIZE
+            if use_sharded_query_cache:
+                query_shard_dir = os.path.join(query_cache_dir, "shards")
+                os.makedirs(query_shard_dir, exist_ok=True)
+                print(f"[DEBUG] Using sharded query cache in {query_shard_dir} with shard_size={QUERY_SHARD_SIZE}")
+                query_emb_chunks = []
+                total_queries = len(query)
+                for start_idx in range(0, total_queries, QUERY_SHARD_SIZE):
+                    end_idx = min(start_idx + QUERY_SHARD_SIZE, total_queries)
+                    shard_path = os.path.join(query_shard_dir, f"emb_{start_idx:07d}_{end_idx:07d}.npy")
+                    if os.path.isfile(shard_path):
+                        print(f"Loading cached query shard {start_idx}-{end_idx-1} from {shard_path}")
+                        emb_chunk = np.load(shard_path, allow_pickle=True)
+                    else:
+                        print(f"Encoding query shard {start_idx}-{end_idx-1} ({end_idx-start_idx} queries)...")
+                        shard_queries = query[start_idx:end_idx]
+                        if use_multigpu and num_gpus > 1:
+                            emb_chunk = encode_with_multigpu(
+                                MODEL_NAME,
+                                model_kwargs,
+                                shard_queries,
+                                query_instruction,
+                                batch_size,
+                                max_length,
+                                num_gpus,
+                            )
+                        else:
+                            with torch.inference_mode():
+                                emb_chunk = model.encode(
+                                    shard_queries,
+                                    instruction=query_instruction,
+                                    batch_size=batch_size,
+                                    max_length=max_length,
+                                )
+                        if use_cache:
+                            print(f"Saving query shard {start_idx}-{end_idx-1} to cache: {shard_path}")
+                            np.save(shard_path, emb_chunk)
+                    query_emb_chunks.append(emb_chunk)
+                query_emb = np.concatenate(query_emb_chunks, axis=0)
+                print(f"[DEBUG] Finished query encoding; query_emb shape: {query_emb.shape}")
+                if use_cache and query_cache_file:
+                    print(f"Saving combined query embeddings to cache: {query_cache_file}")
+                    np.save(query_cache_file, query_emb)
             else:
-                with torch.inference_mode():
-                    query_emb = model.encode(
-                        query,
-                        instruction=query_instruction,
-                        batch_size=batch_size,
-                        max_length=max_length
-                    )
-            if use_cache and query_cache_file:
-                print(f"Saving query embeddings to cache: {query_cache_file}")
-                np.save(query_cache_file, query_emb)
+                print(f"Encoding {len(query)} queries...")
+                if use_multigpu and num_gpus > 1:
+                    query_emb = encode_with_multigpu(MODEL_NAME, model_kwargs, query, query_instruction, batch_size, max_length, num_gpus)
+                else:
+                    with torch.inference_mode():
+                        query_emb = model.encode(
+                            query,
+                            instruction=query_instruction,
+                            batch_size=batch_size,
+                            max_length=max_length
+                        )
+                print(f"[DEBUG] Finished query encoding; query_emb shape: {query_emb.shape}")
+                if use_cache and query_cache_file:
+                    print(f"Saving query embeddings to cache: {query_cache_file}")
+                    np.save(query_cache_file, query_emb)
     
     # Compute similarity scores
     print("Computing similarity scores...")
     if use_faiss:
         # Use FAISS for large-scale search (more memory efficient for very large corpora)
+        print(f"[DEBUG] Creating FAISS index '{INDEX_NAME}'...")
         index = tools.create_index(INDEX_NAME, query_emb, doc_emb)
+        print(f"[DEBUG] FAISS index '{INDEX_NAME}' created; starting search_index...")
         scores, indices = tools.search_index(index, query_emb)
+        print("[DEBUG] Finished FAISS search_index()")
     else:
         # Use direct matrix multiplication (faster for smaller corpora, matches retrievers.py approach)
         with tools.benchmark(MODEL_NAME, "Similarity"):
@@ -509,7 +642,9 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
             indices = np.argsort(scores_np, axis=1)[:, ::-1][:, :top_k]
             scores = np.take_along_axis(scores_np, indices, axis=1)
     
+    print("[DEBUG] Starting retrieval and writing results...")
     tools.start_retrieval(OUTPUT_FILE, query, ground_truths, doc_ids, doc_title_map, indices, scores)
+    print(f"[DEBUG] Finished retrieval. Results written to: {OUTPUT_FILE}")
  
 
 if __name__ == "__main__":
@@ -628,26 +763,6 @@ Examples:
     )
     
     parser.add_argument(
-        "--quick-run",
-        action="store_true",
-        help="Quick sanity check: Use only first 100 documents and 10 queries (default: False)"
-    )
-    
-    parser.add_argument(
-        "--quick-docs",
-        type=int,
-        default=100,
-        help="Number of documents to use in quick run mode (default: 100)"
-    )
-    
-    parser.add_argument(
-        "--quick-queries",
-        type=int,
-        default=10,
-        help="Number of queries to use in quick run mode (default: 10)"
-    )
-    
-    parser.add_argument(
         "--auto-batch",
         action="store_true",
         help="Automatically tune batch sizes based on GPU memory (default: False)"
@@ -657,6 +772,20 @@ Examples:
         "--multigpu",
         action="store_true",
         help="Use multiple GPUs if available (default: False). Requires multiple GPUs in SLURM."
+    )
+
+    parser.add_argument(
+        "--max-docs",
+        type=int,
+        default=None,
+        help="Limit to the first N documents (for debugging / small runs)."
+    )
+
+    parser.add_argument(
+        "--max-queries",
+        type=int,
+        default=None,
+        help="Limit to the first N queries (for debugging / small runs)."
     )
     
     args = parser.parse_args()
@@ -681,9 +810,8 @@ Examples:
         cache_dir=args.cache_dir,
         use_faiss=not args.no_faiss,
         max_length=args.max_length,
-        quick_run=args.quick_run,
-        quick_docs=args.quick_docs,
-        quick_queries=args.quick_queries,
         auto_batch=args.auto_batch,
-        use_multigpu=args.multigpu
+        use_multigpu=args.multigpu,
+        max_docs=args.max_docs,
+        max_queries=args.max_queries
     )

@@ -38,3 +38,18 @@ python code/evaluation/preprocess_qrels.py --input data/QUEST/test.jsonl
 python code/evaluation/evaluate.py --run outputs/runs/toy_run_trec --qrels data/QUEST/test_qrels --cutoffs 1 5 10
 
  ```
+
+
+ ### Run BM25
+
+ ```bash
+cd /home/mhoveyda1/SIGIR_2026/SIGIR26_Repro_ComplexIR/code/baselines/OrLog/RSN
+
+export EXAMPLES=/home/mhoveyda1/SIGIR_2026/SIGIR26_Repro_ComplexIR/data/QUEST_w_Variants/data/quest_test_withVarients_converted.jsonl
+export DOCS=/home/mhoveyda1/SIGIR_2026/SIGIR26_Repro_ComplexIR/data/QUEST_w_Variants/data/quest_text_w_id_withVarients.jsonl
+export SAMPLE=0
+export TOPK=100
+export MODEL=BM25
+
+./run_retriever.sh
+ ```
