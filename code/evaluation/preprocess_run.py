@@ -226,6 +226,9 @@ def preprocess_run(input_path: str, output_path: str, default_run_name: str = "r
                             is_jsonl = True
                         elif "docs" in data or "scores" in data:
                             is_jsonl = True
+                    # Check if it has the expected JSONL structure
+                    if isinstance(data, dict) and ("docs" in data or "scores" in data):
+                        is_jsonl = True
                 except (json.JSONDecodeError, ValueError):
                     pass
     except Exception:
@@ -241,6 +244,8 @@ def preprocess_run(input_path: str, output_path: str, default_run_name: str = "r
                     continue
             if is_jsonl:
                 # Try parsing as JSONL (id/docs/scores) first
+            if is_jsonl:
+                # Try parsing as JSONL first
                 parsed_list = parse_jsonl_line(line)
                 if parsed_list is not None:
                     for qid, docid, score in parsed_list:
