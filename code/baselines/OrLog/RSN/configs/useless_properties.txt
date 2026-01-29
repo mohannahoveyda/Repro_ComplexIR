@@ -1,0 +1,45 @@
+IMDb ID
+FilmAffinity film ID
+Rotten Tomatoes ID
+MPA film rating
+DNF film ID
+Kinopoisk film ID
+Google Knowledge Graph ID
+LUMIERE film ID
+TMDB movie ID
+Letterboxd film ID
+iTunes movie ID
+Trakt.tv ID
+Apple TV movie ID
+Plex media key
+Schnittberichte.com title ID
+NientePopCorn movie ID
+Trakt.tv film ID
+FilmVandaag ID
+EIDR content ID
+Moviebuff ID
+AlloCiné film ID
+Metacritic ID
+Douban film ID
+Filmweb.pl film ID
+IGAC rating
+Kinobox film ID
+review score
+AllMovie title ID
+official website
+box office
+KINENOTE film ID
+EIRIN film rating
+The Numbers movie ID
+MYmovies movie ID
+Movieplayer film ID
+Il mondo dei doppiatori ID
+FilmTv.it movie ID
+Unconsenting Media ID
+Allcinema film ID
+Movie Walker Press film ID
+title
+cast
+ISAN
+cost
+duration

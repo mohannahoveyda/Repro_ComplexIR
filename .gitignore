@@ -28,3 +28,5 @@ outputs/logs/
 .archived/
 code/baselines/reasonir_repo/
 outputs/runs/reasonir-8b/
+
+ReasonIR-8B-QUEST
