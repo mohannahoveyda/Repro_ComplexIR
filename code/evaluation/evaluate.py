@@ -290,6 +290,24 @@ def main():
         default=None,
         help="Optional path to save results as JSON",
     )
+    parser.add_argument(
+        "--latex",
+        action="store_true",
+        help="Print a LaTeX table row (full line with 12 columns).",
+    )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default="Model",
+        help="Model name for the LaTeX row (used with --latex).",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=["quest", "quest_plus"],
+        default="quest",
+        help="Which dataset block to fill in the LaTeX row: quest (first 6 cols) or quest_plus (last 6 cols). Used with --latex.",
+    )
     args = parser.parse_args()
     
     print(f"[evaluation] Loading ground truth from: {args.qrels}")
@@ -328,6 +346,21 @@ def main():
         with open(args.output, "w", encoding="utf-8") as f:
             json.dump(output_data, f, indent=2)
         print(f"\n[evaluation] Results saved to: {args.output}")
+
+    # LaTeX table row (order: Recall@5,20,100, nDCG@5,20,100 for each block)
+    if args.latex:
+        def fmt(v: float) -> str:
+            return f"\\n{{{v:.4f}}}"
+        place = "\\n{0.0}"
+        cutoffs = args.cutoffs
+        r_vals = [fmt(results["recall"][k]) for k in cutoffs]
+        n_vals = [fmt(results["ndcg"][k]) for k in cutoffs]
+        quest_block = " & ".join(r_vals + n_vals)
+        if args.dataset == "quest":
+            line = f"{args.model_name} & &\n{quest_block} &\n{place} & {place} & {place} & {place} & {place} & {place} \\\\\n"
+        else:
+            line = f"{args.model_name} & &\n{place} & {place} & {place} & {place} & {place} & {place} &\n{quest_block} \\\\\n"
+        print("\n[LaTeX row]\n" + line)
 
 
 if __name__ == "__main__":
