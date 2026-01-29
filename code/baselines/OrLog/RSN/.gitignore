@@ -1,0 +1,30 @@
+*.pyc
+__pycache__/
+/quest_datasets
+/predictions
+/LOGS
+.aaa/
+.archive/
+.cache/
+LOGS_ARXIV/
+important arxiv/
+new_arxiv/
+runs/
+filtered_predictions_with_wikidata_and_wikipedia_metadata_2_9_Nov.jsonl
+datasets/
+language/quest/e5/quest_e5_base_v2.index
+llm_responses_cache.sqlite3
+t.ipynb
+/LIGS
+/.extra
+*.out
+*.err
+*.log
+src/main\ copy.py
+temp.ipynb
+results/
+src/helpers/generate_latex.py
+src/helpers/tableify.py
+.runs/
+slurm_scripts/sample copy.slurm
+src/llm_serve

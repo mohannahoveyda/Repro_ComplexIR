@@ -31,3 +31,5 @@ outputs/runs/reasonir-8b/
 
 benchmarks.csv
 ReasonIR-8B-QUEST
+
+/code/evaluation/EVALUATION_NOTES.md
