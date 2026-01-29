@@ -44,7 +44,8 @@ def load_qrels(qrels_path: str) -> Dict[str, Set[str]]:
             if len(parts) < 4:
                 continue
             
-            qid = parts[0]
+            # Ensure query ID is a string (consistent with JSONL evaluation)
+            qid = str(parts[0])
             # Second field should be "0"
             if parts[1] != "0":
                 continue
@@ -57,7 +58,8 @@ def load_qrels(qrels_path: str) -> Dict[str, Set[str]]:
             
             # Docid is everything between parts[2] and parts[-1]
             # Join with spaces to handle docids with spaces
-            docid = " ".join(parts[2:-1])
+            # Ensure docid is a string (consistent with JSONL evaluation)
+            docid = str(" ".join(parts[2:-1]))
             
             # Only include documents with positive relevance
             if relevance > 0:
@@ -92,47 +94,41 @@ def load_trec_run(run_path: str) -> Dict[str, List[tuple]]:
             if len(parts) < 6:
                 continue
             
-            qid = parts[0]
+            # Ensure query ID is a string (consistent with JSONL evaluation)
+            qid = str(parts[0])
             # Second field should be "Q0"
             if parts[1] != "Q0":
                 continue
             
-            # Rank is the first integer after Q0
-            # Score is the first float after rank
-            # Find rank and score positions
-            rank_idx = None
-            score_idx = None
+            # Parse from the END of the line (more reliable when docids contain numbers)
+            # Format: qid Q0 docid rank score run_name
+            # - run_name is the last field
+            # - score is the second-to-last field (must be a float)
+            # - rank is the third-to-last field (must be an integer)
+            # - docid is everything between parts[2] and the rank field
             
-            for i in range(2, len(parts)):
-                # Try to parse as integer (rank)
-                if rank_idx is None:
-                    try:
-                        int(parts[i])
-                        rank_idx = i
-                        continue
-                    except ValueError:
-                        pass
-                
-                # Try to parse as float (score)
-                if rank_idx is not None and score_idx is None:
-                    try:
-                        float(parts[i])
-                        score_idx = i
-                        break
-                    except ValueError:
-                        pass
-            
-            if rank_idx is None or score_idx is None:
+            if len(parts) < 6:
                 continue
             
-            # Docid is everything between parts[2] and parts[rank_idx]
-            doc_id = " ".join(parts[2:rank_idx])
-            rank = int(parts[rank_idx])
-            score = float(parts[score_idx])
+            # Try to parse score (second-to-last field)
+            try:
+                score = float(parts[-2])
+            except (ValueError, IndexError):
+                continue
+            
+            # Try to parse rank (third-to-last field)
+            try:
+                rank = int(parts[-3])
+            except (ValueError, IndexError):
+                continue
+            
+            # Docid is everything between parts[2] and parts[-3] (before rank)
+            # Ensure docid is a string (consistent with JSONL evaluation)
+            doc_id = str(" ".join(parts[2:-3]))
             
             runs[qid].append((doc_id, rank, score))
     
-    # Sort by rank for each query
+    # Sort by rank for each query (trust the ranks in the TREC file)
     for qid in runs:
         runs[qid].sort(key=lambda x: x[1])
     
@@ -283,7 +279,9 @@ def main():
         "--cutoffs",
         type=int,
         nargs="+",
-        default=[1, 5, 10, 20, 50, 100],
+        # default=[1, 5, 10, 20, 50, 100],
+        default=[5, 20, 100],
+
         help="List of cutoff values (k) for evaluation",
     )
     parser.add_argument(
