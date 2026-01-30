@@ -495,6 +495,11 @@ def main():
         default=100,
         help="Max distinct queries per template",
     )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="After saving limit_quest_queries.jsonl, run statistics and save table/figure",
+    )
 
     args = parser.parse_args()
     start_time = time.time()
@@ -539,6 +544,16 @@ def main():
     elapsed = time.time() - start_time
     print(f"Saved queries to: {out_path}")
     print(f"Total time: {elapsed:.2f} seconds")
+    if args.stats:
+        from quest_stats import compute_and_display_limit_quest_stats
+        compute_and_display_limit_quest_stats(
+            queries_path=out_path,
+            output_dir=data_dir,
+            save_table=True,
+            save_figure=True,
+        )
+    else:
+        print("To get a statistics table and distribution figure, run: python quest_stats.py")
 
 if __name__ == "__main__":
     main()
