@@ -14,7 +14,7 @@ Computes:
 import argparse
 import json
 from collections import defaultdict
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 import numpy as np
 
@@ -215,23 +215,30 @@ def ndcg_at_k(retrieved: List[str], relevant: Set[str], k: int) -> float:
 def evaluate(
     qrels: Dict[str, Set[str]],
     runs: Dict[str, List[tuple]],
-    cutoffs: List[int]
+    cutoffs: List[int],
+    query_ids: Optional[List[str]] = None,
 ) -> Dict[str, Dict[int, float]]:
     """
     Evaluate retrieval results.
-    
+
     Args:
         qrels: Ground truth (query_id -> set of relevant docs)
         runs: Retrieval results (query_id -> list of (doc_id, rank, score))
         cutoffs: List of cutoff values (k)
-    
+        query_ids: Optional list of query IDs to evaluate on (must be subset of
+            overlapping qrels and runs). If None, use all overlapping queries.
+
     Returns:
         Dict with keys 'recall' and 'ndcg', each mapping to
         Dict[cutoff -> average metric value]
     """
     # Get all query IDs that appear in both qrels and runs
-    query_ids = set(qrels.keys()) & set(runs.keys())
-    
+    overlapping = set(qrels.keys()) & set(runs.keys())
+    if query_ids is not None:
+        query_ids = [q for q in query_ids if q in overlapping]
+    else:
+        query_ids = sorted(overlapping)
+
     if len(query_ids) == 0:
         raise ValueError("No overlapping query IDs between ground truth and run file")
     
@@ -266,8 +273,8 @@ def main():
     parser.add_argument(
         "--run",
         type=str,
-        required=True,
-        help="Path to TREC run file",
+        default=None,
+        help="Path to TREC run file (required unless --compare is used with two runs)",
     )
     parser.add_argument(
         "--qrels",
@@ -279,10 +286,35 @@ def main():
         "--cutoffs",
         type=int,
         nargs="+",
-        # default=[1, 5, 10, 20, 50, 100],
         default=[5, 20, 100],
-
         help="List of cutoff values (k) for evaluation",
+    )
+    parser.add_argument(
+        "--max-queries",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Evaluate only on the first N queries (sorted by query ID). E.g. 100 for first 100 queries.",
+    )
+    parser.add_argument(
+        "--compare",
+        type=str,
+        nargs=2,
+        metavar=("RUN1", "RUN2"),
+        default=None,
+        help="Compare two runs: provide two TREC run paths. Ignores --run. Use with --name1 and --name2 for labels.",
+    )
+    parser.add_argument(
+        "--name1",
+        type=str,
+        default="Run 1",
+        help="Label for first run in compare mode (used with --compare).",
+    )
+    parser.add_argument(
+        "--name2",
+        type=str,
+        default="Run 2",
+        help="Label for second run in compare mode (used with --compare).",
     )
     parser.add_argument(
         "--output",
@@ -309,39 +341,99 @@ def main():
         help="Which dataset block to fill in the LaTeX row: quest (first 6 cols) or quest_plus (last 6 cols). Used with --latex.",
     )
     args = parser.parse_args()
-    
+
+    # Resolve run(s): either single --run or --compare RUN1 RUN2
+    if args.compare is not None:
+        run_path_1, run_path_2 = args.compare
+        run_path = run_path_1  # for qrels/loading logic we load both
+        compare_mode = True
+    else:
+        if args.run is None:
+            parser.error("Either --run or --compare RUN1 RUN2 is required")
+        run_path = args.run
+        run_path_1 = run_path_2 = None
+        compare_mode = False
+
     print(f"[evaluation] Loading ground truth from: {args.qrels}")
     qrels = load_qrels(args.qrels)
     print(f"[evaluation] Loaded {len(qrels)} queries with ground truth")
-    
-    print(f"[evaluation] Loading run file from: {args.run}")
-    runs = load_trec_run(args.run)
-    print(f"[evaluation] Loaded {len(runs)} queries in run file")
-    
-    print(f"[evaluation] Evaluating with cutoffs: {args.cutoffs}")
-    results = evaluate(qrels, runs, args.cutoffs)
-    
+
+    # Build query subset: overlapping queries, optionally limited to first N (sorted)
+    if compare_mode:
+        print(f"[evaluation] Loading run 1: {args.compare[0]}")
+        runs1 = load_trec_run(args.compare[0])
+        print(f"[evaluation] Loading run 2: {args.compare[1]}")
+        runs2 = load_trec_run(args.compare[1])
+        overlapping = sorted(set(qrels.keys()) & set(runs1.keys()) & set(runs2.keys()))
+    else:
+        print(f"[evaluation] Loading run file from: {args.run}")
+        runs = load_trec_run(args.run)
+        print(f"[evaluation] Loaded {len(runs)} queries in run file")
+        overlapping = sorted(set(qrels.keys()) & set(runs.keys()))
+    if args.max_queries is not None:
+        query_subset = overlapping[: args.max_queries]
+        print(f"[evaluation] Limiting to first {args.max_queries} queries (sorted by qid): {len(query_subset)} queries")
+    else:
+        query_subset = overlapping
+    if not query_subset:
+        raise ValueError("No overlapping query IDs between ground truth and run file(s)")
+
+    if compare_mode:
+        # Evaluate both runs on query_subset (runs1, runs2 already loaded)
+        print(f"[evaluation] Evaluating with cutoffs: {args.cutoffs} (compare mode, {len(query_subset)} queries)")
+        results1 = evaluate(qrels, runs1, args.cutoffs, query_ids=query_subset)
+        results2 = evaluate(qrels, runs2, args.cutoffs, query_ids=query_subset)
+
+        # Print comparison table
+        print("\n" + "=" * 80)
+        print(f"Comparison (first {len(query_subset)} queries)")
+        print("=" * 80)
+        w = 12
+        print(f"\n{'Cutoff':<8} {'Recall@k':<{w}} {'NDCG@k':<{w}}  |  {'Recall@k':<{w}} {'NDCG@k':<{w}}")
+        print(f"{args.name1:<{w*2+4}}  |  {args.name2}")
+        print("-" * 80)
+        for k in args.cutoffs:
+            r1, n1 = results1["recall"][k], results1["ndcg"][k]
+            r2, n2 = results2["recall"][k], results2["ndcg"][k]
+            print(f"{k:<8} {r1:<{w}.4f} {n1:<{w}.4f}  |  {r2:<{w}.4f} {n2:<{w}.4f}")
+        print("=" * 80)
+
+        if args.output:
+            output_data = {
+                "num_queries": len(query_subset),
+                "max_queries": args.max_queries,
+                "cutoffs": args.cutoffs,
+                args.name1: {"recall": results1["recall"], "ndcg": results1["ndcg"]},
+                args.name2: {"recall": results2["recall"], "ndcg": results2["ndcg"]},
+            }
+            with open(args.output, "w", encoding="utf-8") as f:
+                json.dump(output_data, f, indent=2)
+            print(f"\n[evaluation] Comparison results saved to: {args.output}")
+        return
+
+    # Single-run evaluation (runs already loaded above)
+    print(f"[evaluation] Evaluating with cutoffs: {args.cutoffs} ({len(query_subset)} queries)")
+    results = evaluate(qrels, runs, args.cutoffs, query_ids=query_subset)
+
     # Print results
     print("\n" + "=" * 60)
     print("Evaluation Results")
     print("=" * 60)
     print(f"\n{'Cutoff':<10} {'Recall@k':<15} {'NDCG@k':<15}")
     print("-" * 60)
-    
     for k in args.cutoffs:
         recall = results["recall"][k]
         ndcg = results["ndcg"][k]
         print(f"{k:<10} {recall:<15.4f} {ndcg:<15.4f}")
-    
     print("=" * 60)
-    
-    # Save results if output path is provided
+
     if args.output:
         output_data = {
             "cutoffs": args.cutoffs,
             "recall": results["recall"],
             "ndcg": results["ndcg"],
-            "num_queries": len(set(qrels.keys()) & set(runs.keys()))
+            "num_queries": len(query_subset),
+            "max_queries": args.max_queries,
         }
         with open(args.output, "w", encoding="utf-8") as f:
             json.dump(output_data, f, indent=2)

@@ -102,8 +102,25 @@ python code/evaluation/evaluate.py \
   --qrels data/QUEST/test_id_added_qrels
 ```
 
+**First N queries only:** Use `--max-queries N` to evaluate only on the first N queries (query IDs are sorted for a deterministic order):
+```bash
+python code/evaluation/evaluate.py \
+  --run outputs/runs/my_run_trec \
+  --qrels data/QUEST/test_id_added_qrels \
+  --max-queries 100
+```
+
+**Compare two runs:** Use `--compare RUN1 RUN2` to evaluate and compare two model runs side-by-side. Combine with `--max-queries` to compare on the first N queries only. Optional `--name1` and `--name2` set labels in the output.
+```bash
+python code/evaluation/evaluate.py \
+  --qrels data/QUEST/test_id_added_qrels \
+  --compare outputs/runs/model_a_trec outputs/runs/model_b_trec \
+  --name1 "Model A" --name2 "Model B" \
+  --max-queries 100
+```
+
 **Output:**
-The script prints a table with Recall@k and NDCG@k for each cutoff,
+The script prints a table with Recall@k and NDCG@k for each cutoff. In compare mode, both runs are printed side-by-side.
 
 If `--output` is specified, results are also saved as JSON:
 
@@ -112,16 +129,9 @@ If `--output` is specified, results are also saved as JSON:
 
 ## Complete Workflow Example
 
-Here's a complete example of evaluating retrieval results:
+To evaluate a model's performance; 1) Preprocess ground truth (if not already done), 2) Preprocess retrieval results, 3) Evaluate
 
-```bash
-# Step 1: Preprocess ground truth (if not already done)
 
-# Step 2: Preprocess retrieval results
-
-# Step 3: Evaluate
-
-```
 
 ---
 
