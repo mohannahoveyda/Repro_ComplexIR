@@ -25,25 +25,12 @@ if baselines_dir not in sys.path:
     sys.path.insert(0, baselines_dir)
 
 import utils.helper as tools
-from transformers import AutoModel, AutoTokenizer
+from gritlm import GritLM
 from torchmetrics.functional.pairwise import pairwise_cosine_similarity
 
-# Try to import optional optimizations
-try:
-    from torch.nn import DataParallel
-    HAS_DATAPARALLEL = True
-except ImportError:
-    HAS_DATAPARALLEL = False
 
-try:
-    import flash_attn
-    HAS_FLASH_ATTN = True
-except ImportError:
-    HAS_FLASH_ATTN = False
-
-
-def reasonir_instruction(instruction):
-    """Format instruction for ReasonIR embedding (required special tokens, same as GritLM)."""
+def gritlm_instruction(instruction):
+    """Format instruction for GritLM embedding (required special tokens)."""
     return "<|user|>\n" + instruction + "\n<|embed|>\n" if instruction else "<|embed|>\n"
 
 
@@ -57,6 +44,19 @@ def content_hash(texts):
         h.update(b"\n")
     return h.hexdigest()[:24]
 
+
+def _to_numpy(emb):
+    """Convert model encode output to numpy array."""
+    if hasattr(emb, "cpu"):
+        return emb.cpu().numpy()
+    return np.asarray(emb)
+
+# Optional: flash_attn (GritLM may use if available)
+try:
+    import flash_attn
+    HAS_FLASH_ATTN = True
+except ImportError:
+    HAS_FLASH_ATTN = False
 
 def inspect_batch_samples(texts, batch_size, name="items", max_samples=2):
     """Minimal function to inspect what's in each batch. Enable with INSPECT_BATCHES=1"""
@@ -83,15 +83,14 @@ def inspect_batch_samples(texts, batch_size, name="items", max_samples=2):
             print(f"  ... and {len(batch_texts) - 3} more items in this batch")
     print(f"{'='*60}\n")
 
-def auto_tune_batch_size(model, texts, device, max_length, start_batch=32, max_batch=512):
-    """Automatically find optimal batch size based on GPU memory."""
+def auto_tune_batch_size(model, texts, device, instruction, start_batch=32, max_batch=512):
+    """Automatically find optimal batch size based on GPU memory (GritLM: encode(batch, instruction=))."""
     if device != "cuda":
         return start_batch
     
     model.eval()
     optimal_batch = start_batch
     
-    # Try progressively larger batches
     test_sizes = [start_batch]
     if start_batch * 2 <= max_batch:
         test_sizes.append(start_batch * 2)
@@ -103,11 +102,10 @@ def auto_tune_batch_size(model, texts, device, max_length, start_batch=32, max_b
     for test_batch in test_sizes:
         try:
             torch.cuda.empty_cache()
-            # Test with a small sample (use min to avoid issues)
-            test_size = min(test_batch, len(texts), 100)  # Test with up to 100 samples
+            test_size = min(test_batch, len(texts), 100)
             test_texts = texts[:test_size]
             with torch.inference_mode():
-                _ = model.encode(test_texts, batch_size=test_batch, max_length=max_length)
+                _ = model.encode(test_texts, instruction=instruction)
             optimal_batch = test_batch
             torch.cuda.empty_cache()
         except RuntimeError as e:
@@ -115,47 +113,33 @@ def auto_tune_batch_size(model, texts, device, max_length, start_batch=32, max_b
                 torch.cuda.empty_cache()
                 break
             else:
-                # For other errors, log but continue
                 print(f"Warning during batch size test: {e}")
                 break
     
     return optimal_batch
 
-def encode_worker(gpu_id, model_name, model_kwargs, texts_chunk, instruction, batch_size, max_length, result_queue, temp_dir):
-    """Worker function for multiprocessing: loads model on specific GPU and encodes texts.
-    
-    This runs in a separate process with its own CUDA context, preventing memory conflicts.
-    Each process only sees its assigned GPU, ensuring complete isolation.
+def encode_worker(gpu_id, model_name, texts_chunk, instruction, batch_size, result_queue, temp_dir):
+    """Worker function for multiprocessing: loads GritLM on specific GPU and encodes texts.
+    Runs in a separate process with its own CUDA context. GritLM encode(batch, instruction=).
     """
     try:
-        # Set CUDA device for this process BEFORE any CUDA operations
-        # This ensures the process only uses its assigned GPU
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
-        
-        # Reinitialize CUDA in this process (needed after setting CUDA_VISIBLE_DEVICES)
         import torch
         torch.cuda.empty_cache()
-        torch.cuda.set_device(0)  # Now GPU 0 in this process is the actual GPU gpu_id
-        
-        # Import here to ensure each process has its own imports
-        from transformers import AutoModel
-        
-        print(f"[GPU {gpu_id} Process] Loading model on device cuda:0 (maps to physical GPU {gpu_id})...")
-        
-        # Prepare model kwargs for this GPU
-        gpu_kwargs = model_kwargs.copy()
-        gpu_kwargs["device_map"] = {"": "cuda:0"}  # Use cuda:0 since CUDA_VISIBLE_DEVICES makes it the only GPU
-        gpu_kwargs["low_cpu_mem_usage"] = True
-        
-        # Load model (will see only one GPU due to CUDA_VISIBLE_DEVICES)
-        model = AutoModel.from_pretrained(model_name, **gpu_kwargs)
+        torch.cuda.set_device(0)
+
+        from gritlm import GritLM
+
+        print(f"[GPU {gpu_id} Process] Loading GritLM on device cuda:0 (maps to physical GPU {gpu_id})...")
+        model = GritLM(model_name, torch_dtype="auto", mode="embedding")
         model.eval()
-        
+        # GritLM may expose device_map; ensure it runs on cuda:0 in this process
+        if hasattr(model, "to"):
+            model = model.to("cuda:0")
+
         memory_used = torch.cuda.memory_allocated(0) / 1024**3
         print(f"[GPU {gpu_id} Process] Model loaded (memory: {memory_used:.2f} GB)")
-        
-        # Encode texts in batches with our own tqdm so progress is always visible
-        # (model.encode()'s internal tqdm can be sparse or in-place for small batch counts, e.g. queries)
+
         import numpy as np
         n_batches = (len(texts_chunk) + batch_size - 1) // batch_size
         print(f"[GPU {gpu_id} Process] Encoding {len(texts_chunk)} texts in {n_batches} batch(es)...")
@@ -169,33 +153,23 @@ def encode_worker(gpu_id, model_name, model_kwargs, texts_chunk, instruction, ba
                 file=sys.stderr,
             ):
                 batch_texts = texts_chunk[start : start + batch_size]
-                emb = model.encode(
-                    batch_texts,
-                    instruction=instruction,
-                    batch_size=len(batch_texts),
-                    max_length=max_length,
-                )
-                emb_list.append(emb.cpu().numpy() if hasattr(emb, "cpu") else emb)
+                emb = model.encode(batch_texts, instruction=instruction)
+                emb_list.append(_to_numpy(emb))
         embeddings = np.concatenate(emb_list, axis=0)
-        
+
         print(f"[GPU {gpu_id} Process] Encoded -> shape {embeddings.shape}")
-        
-        # Save embeddings to a temporary file for this worker to avoid sending
-        # large arrays through the multiprocessing.Queue (which would require
-        # pickling and large IPC transfers).
+
         os.makedirs(temp_dir, exist_ok=True)
         shard_path = os.path.join(temp_dir, f"gpu_{gpu_id}.npy")
         np.save(shard_path, embeddings)
-        
-        # Put only metadata (gpu_id, filename) in the queue
+
         result_queue.put((gpu_id, shard_path))
-        
-        # Cleanup
+
         del model
         import gc
         gc.collect()
         torch.cuda.empty_cache()
-        
+
     except Exception as e:
         import traceback
         error_msg = f"[GPU {gpu_id} Process] ERROR: {e}\n{traceback.format_exc()}"
@@ -203,55 +177,47 @@ def encode_worker(gpu_id, model_name, model_kwargs, texts_chunk, instruction, ba
         result_queue.put((gpu_id, None))
         raise
 
-def encode_with_multigpu(model_name, model_kwargs, texts, instruction, batch_size, max_length, num_gpus):
+def encode_with_multigpu(model_name, texts, instruction, batch_size, num_gpus):
     """Encode texts using multiple GPUs by splitting work across GPUs (data parallelism).
-    
-    This splits the texts across available GPUs and encodes them sequentially on each GPU.
-    Each GPU gets its own separate model instance loaded independently.
+    Each GPU loads its own GritLM instance and encodes its chunk (GritLM: encode(batch, instruction=)).
     """
     if num_gpus <= 1:
-        # This shouldn't be called with num_gpus <= 1, but handle it gracefully
-        # Load a single model instance on GPU 0
         torch.cuda.set_device(0)
-        single_model = AutoModel.from_pretrained(model_name, **model_kwargs)
+        single_model = GritLM(model_name, torch_dtype="auto", mode="embedding")
         single_model.eval()
-        single_model.to("cuda:0")
+        if hasattr(single_model, "to"):
+            single_model = single_model.to("cuda:0")
+        emb_list = []
         with torch.inference_mode():
-            result = single_model.encode(texts, instruction=instruction, batch_size=batch_size, max_length=max_length)
+            for start in range(0, len(texts), batch_size):
+                batch_texts = texts[start : start + batch_size]
+                emb = single_model.encode(batch_texts, instruction=instruction)
+                emb_list.append(_to_numpy(emb))
+        result = np.concatenate(emb_list, axis=0)
         del single_model
         torch.cuda.empty_cache()
         return result
-    
+
     print(f"Splitting {len(texts)} texts across {num_gpus} GPUs for PARALLEL encoding...")
-    
-    # Split texts across GPUs for data parallelism
+
     chunk_size = math.ceil(len(texts) / num_gpus)
     chunks = [texts[i:i+chunk_size] for i in range(0, len(texts), chunk_size)]
-    
-    # Ensure we have exactly num_gpus chunks
     while len(chunks) < num_gpus:
         chunks.append([])
-    
-    # Use multiprocessing for true parallelism
-    # Each process gets its own CUDA context, preventing memory conflicts
+
     print(f"Starting {num_gpus} parallel processes (one per GPU)...")
-    
-    # Create queue for results (metadata only) and a temporary directory for
-    # per-GPU embedding files. This avoids pushing large arrays through the
-    # queue, which would require expensive pickling and IPC.
     result_queue = Queue()
-    temp_dir = tempfile.mkdtemp(prefix="reasonir_mgpu_")
+    temp_dir = tempfile.mkdtemp(prefix="gritlm_mgpu_")
     processes = []
-    
-    # Start a process for each GPU
+
     for gpu_id in range(num_gpus):
         if len(chunks[gpu_id]) == 0:
             continue
-        
+
         print(f"  Starting process for GPU {gpu_id} ({len(chunks[gpu_id])} texts)...")
         p = Process(
             target=encode_worker,
-            args=(gpu_id, model_name, model_kwargs, chunks[gpu_id], instruction, batch_size, max_length, result_queue, temp_dir)
+            args=(gpu_id, model_name, chunks[gpu_id], instruction, batch_size, result_queue, temp_dir)
         )
         p.start()
         processes.append((gpu_id, p))
@@ -293,14 +259,13 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
          model_name=None, index_name=None, device=None, batch_size=32, doc_batch_size=None, 
          use_fp16=True, use_cache=True, cache_dir=None, use_faiss=True, max_length=32768, 
          auto_batch=False, use_multigpu=False, max_docs=None, max_queries=None,
-         query_instruction_raw=None, doc_instruction_raw=None,
          task_suffix=None, query_format=None, corpus_format=None):
     # Debug: Check INSPECT_BATCHES environment variable early
     inspect_env = os.getenv("INSPECT_BATCHES", "0")
     print(f"[DEBUG] At start of main(), INSPECT_BATCHES = '{inspect_env}'")
 
-    MODEL_NAME = model_name if model_name else "reasonir/ReasonIR-8B"
-    INDEX_NAME = index_name if index_name else "ReasonIR-8B-QUEST"
+    MODEL_NAME = model_name if model_name else "GritLM/GritLM-7B"
+    INDEX_NAME = index_name if index_name else "GritLM-7B-QUEST"
     
     # Set cache directory
     if cache_dir is None:
@@ -396,70 +361,30 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
     print(f"query: {query[:3]}")
     print(f"ground_truths: {ground_truths[:3]}")
     print(f"Loading model: {MODEL_NAME}...")
-    
-    # Workaround for tokenizer loading issue with ReasonIR-8B
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    
-    # Use AutoModel directly (more efficient than SentenceTransformer)
-    # torch_dtype="auto" enables bf16 on supported GPUs (faster than fp16)
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        
-        # Load model with optimizations
-        model_kwargs = {"torch_dtype": "auto", "trust_remote_code": True}
-        # if device == "cuda" and HAS_FLASH_ATTN:
-        #     model_kwargs["attn_implementation"] = "flash_attention_2"
-        #     print("Flash Attention 2: Enabled")
-        
-        # For multi-GPU encoding, we use data parallelism (not model sharding)
-        # Each GPU will load its own model instance in encode_with_multigpu
-        # So we don't need to load a model here for multi-GPU
-        if use_multigpu and num_gpus > 1:
-            print(f"Multi-GPU encoding: Will use data parallelism (splitting texts across {num_gpus} GPUs)")
-            print("Model instances will be loaded separately on each GPU during encoding")
-            # Don't load model here - encode_with_multigpu will load separate instances
-            model = None
-        else:
-            # Single GPU: load model normally
-            model = AutoModel.from_pretrained(MODEL_NAME, **model_kwargs)
-            model.eval()
-            model.to(device_obj)
-            print(f"Model loaded successfully. Using dtype: {next(model.parameters()).dtype}")
-        
-        # Check if flash attention is available and being used
-        if HAS_FLASH_ATTN:
-            print("Flash Attention: Available (may be used automatically)")
-    except Exception as e:
-        error_msg = str(e)
-        if "ModelWrapper" in error_msg or ("tokenizer" in error_msg.lower() and "enum" in error_msg.lower()):
-            print(f"\n{'='*60}")
-            print("ERROR: Tokenizer loading failed due to version incompatibility.")
-            print(f"{'='*60}")
-            print("This is a known issue with tokenizers library version mismatch.")
-            print("\nTo fix this, try one of the following:")
-            print("1. Update tokenizers library:")
-            print("   pip install --upgrade tokenizers")
-            print("2. Clear the model cache and re-download:")
-            print("   rm -rf ~/.cache/huggingface/hub/models--reasonir--ReasonIR-8B")
-            print("3. Or update both transformers and tokenizers:")
-            print("   pip install --upgrade transformers tokenizers")
-            print(f"{'='*60}\n")
-            raise RuntimeError(
-                f"Tokenizer loading failed: {error_msg[:200]}...\n"
-                "Please update the tokenizers library or clear the model cache."
-            ) from e
-        else:
-            raise
 
-    print("Creating Embeddings...")
-    # Set instructions (same pattern as GritLM: raw string + formatter)
-    QUERY_INSTRUCTION_RAW_DEFAULT = "Given a query, retrieve relevant documents that answer the query"
-    query_instruction = reasonir_instruction(
-        query_instruction_raw if query_instruction_raw is not None else QUERY_INSTRUCTION_RAW_DEFAULT
-    )
-    doc_instruction = reasonir_instruction(
-        doc_instruction_raw if doc_instruction_raw is not None else ""
-    )
+    # GritLM: load with gritlm package; multi-GPU loads per-GPU in encode_with_multigpu
+    if use_multigpu and num_gpus > 1:
+        print(f"Multi-GPU encoding: Will use data parallelism (splitting texts across {num_gpus} GPUs)")
+        print("Model instances will be loaded separately on each GPU during encoding")
+        model = None
+    else:
+        model = GritLM(MODEL_NAME, torch_dtype="auto", mode="embedding")
+        model.eval()
+        if hasattr(model, "to"):
+            model = model.to(device_obj)
+        if hasattr(model, "parameters") and next(model.parameters(), None) is not None:
+            print(f"Model loaded successfully. Using dtype: {next(model.parameters()).dtype}")
+        else:
+            print("Model loaded successfully.")
+    if HAS_FLASH_ATTN:
+        print("Flash Attention: Available (may be used automatically)")
+
+    # GritLM requires special instruction format (<|user|> / <|embed|>)
+    # QUERY_INSTRUCTION_RAW = "Given a web search query, retrieve the most relevant documents"
+    QUERY_INSTRUCTION_RAW = "Given a query, retrieve relevant documents that answer the query"
+    query_instruction = gritlm_instruction(QUERY_INSTRUCTION_RAW)
+    doc_instruction = gritlm_instruction("")
 
     # Memory optimization: reduce batch size for documents if we have many documents
     if doc_batch_size is None:
@@ -473,9 +398,9 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
     # Auto-tune batch sizes if requested (skip for multi-GPU as models load separately)
     if auto_batch and device == "cuda" and not (use_multigpu and num_gpus > 1):
         print("Auto-tuning batch sizes based on GPU memory...")
-        optimal_doc_batch = auto_tune_batch_size(model, doc_texts[:1000], device, max_length, 
+        optimal_doc_batch = auto_tune_batch_size(model, doc_texts[:1000], device, doc_instruction,
                                                   start_batch=doc_batch_size, max_batch=512)
-        optimal_query_batch = auto_tune_batch_size(model, query[:100], device, max_length,
+        optimal_query_batch = auto_tune_batch_size(model, query[:100], device, query_instruction,
                                                     start_batch=batch_size, max_batch=512)
         if optimal_doc_batch != doc_batch_size:
             print(f"  Document batch size: {doc_batch_size} -> {optimal_doc_batch}")
@@ -483,7 +408,7 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
         if optimal_query_batch != batch_size:
             print(f"  Query batch size: {batch_size} -> {optimal_query_batch}")
             batch_size = optimal_query_batch
-    
+
     # Content-based cache keys: reuse cache when same doc/query texts are used later
     doc_content_key = content_hash(doc_texts) if use_cache and cache_dir else ""
     query_content_key = content_hash(query) if use_cache and cache_dir else ""
@@ -491,9 +416,9 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
     # Setup cache directories: keyed by model, task, content hash, and batch/maxlen
     if use_cache and cache_dir:
         doc_cache_dir = os.path.join(cache_dir, 'doc_emb', MODEL_NAME.replace('/', '--'), task_name,
-                                      doc_content_key, f"batch_{doc_batch_size}_maxlen_{max_length}")
+                                     doc_content_key, f"batch_{doc_batch_size}_maxlen_{max_length}")
         query_cache_dir = os.path.join(cache_dir, 'query_emb', MODEL_NAME.replace('/', '--'), task_name,
-                                        query_content_key, f"batch_{batch_size}_maxlen_{max_length}")
+                                       query_content_key, f"batch_{batch_size}_maxlen_{max_length}")
         os.makedirs(doc_cache_dir, exist_ok=True)
         os.makedirs(query_cache_dir, exist_ok=True)
         doc_cache_file = os.path.join(doc_cache_dir, 'embeddings.npy')
@@ -540,21 +465,20 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
                         if use_multigpu and num_gpus > 1:
                             emb_chunk = encode_with_multigpu(
                                 MODEL_NAME,
-                                model_kwargs,
                                 shard_texts,
                                 doc_instruction,
                                 doc_batch_size,
-                                max_length,
                                 num_gpus,
                             )
                         else:
+                            emb_list = []
                             with torch.inference_mode():
-                                emb_chunk = model.encode(
-                                    shard_texts,
-                                    instruction=doc_instruction,
-                                    batch_size=doc_batch_size,
-                                    max_length=max_length,
-                                )
+                                for bstart in range(0, len(shard_texts), doc_batch_size):
+                                    bend = min(bstart + doc_batch_size, len(shard_texts))
+                                    batch_texts = shard_texts[bstart:bend]
+                                    emb = model.encode(batch_texts, instruction=doc_instruction)
+                                    emb_list.append(_to_numpy(emb))
+                            emb_chunk = np.concatenate(emb_list, axis=0)
                         if use_cache:
                             print(f"Saving document shard {start_idx}-{end_idx-1} to cache: {shard_path}")
                             np.save(shard_path, emb_chunk)
@@ -567,15 +491,16 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
             else:
                 print(f"Encoding {len(doc_texts)} documents...")
                 if use_multigpu and num_gpus > 1:
-                    doc_emb = encode_with_multigpu(MODEL_NAME, model_kwargs, doc_texts, doc_instruction, doc_batch_size, max_length, num_gpus)
+                    doc_emb = encode_with_multigpu(MODEL_NAME, doc_texts, doc_instruction, doc_batch_size, num_gpus)
                 else:
+                    emb_list = []
                     with torch.inference_mode():
-                        doc_emb = model.encode(
-                            doc_texts,
-                            instruction=doc_instruction,
-                            batch_size=doc_batch_size,
-                            max_length=max_length
-                        )
+                        for start in range(0, len(doc_texts), doc_batch_size):
+                            end = min(start + doc_batch_size, len(doc_texts))
+                            batch_texts = doc_texts[start:end]
+                            emb = model.encode(batch_texts, instruction=doc_instruction)
+                            emb_list.append(_to_numpy(emb))
+                    doc_emb = np.concatenate(emb_list, axis=0)
                 print(f"[DEBUG] Finished document encoding; doc_emb shape: {doc_emb.shape}")
                 if use_cache and doc_cache_file:
                     print(f"Saving document embeddings to cache: {doc_cache_file}")
@@ -613,21 +538,20 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
                         if use_multigpu and num_gpus > 1:
                             emb_chunk = encode_with_multigpu(
                                 MODEL_NAME,
-                                model_kwargs,
                                 shard_queries,
                                 query_instruction,
                                 batch_size,
-                                max_length,
                                 num_gpus,
                             )
                         else:
+                            emb_list = []
                             with torch.inference_mode():
-                                emb_chunk = model.encode(
-                                    shard_queries,
-                                    instruction=query_instruction,
-                                    batch_size=batch_size,
-                                    max_length=max_length,
-                                )
+                                for bstart in range(0, len(shard_queries), batch_size):
+                                    bend = min(bstart + batch_size, len(shard_queries))
+                                    batch_texts = shard_queries[bstart:bend]
+                                    emb = model.encode(batch_texts, instruction=query_instruction)
+                                    emb_list.append(_to_numpy(emb))
+                            emb_chunk = np.concatenate(emb_list, axis=0)
                         if use_cache:
                             print(f"Saving query shard {start_idx}-{end_idx-1} to cache: {shard_path}")
                             np.save(shard_path, emb_chunk)
@@ -640,15 +564,16 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
             else:
                 print(f"Encoding {len(query)} queries...")
                 if use_multigpu and num_gpus > 1:
-                    query_emb = encode_with_multigpu(MODEL_NAME, model_kwargs, query, query_instruction, batch_size, max_length, num_gpus)
+                    query_emb = encode_with_multigpu(MODEL_NAME, query, query_instruction, batch_size, num_gpus)
                 else:
+                    emb_list = []
                     with torch.inference_mode():
-                        query_emb = model.encode(
-                            query,
-                            instruction=query_instruction,
-                            batch_size=batch_size,
-                            max_length=max_length
-                        )
+                        for start in range(0, len(query), batch_size):
+                            end = min(start + batch_size, len(query))
+                            batch_texts = query[start:end]
+                            emb = model.encode(batch_texts, instruction=query_instruction)
+                            emb_list.append(_to_numpy(emb))
+                    query_emb = np.concatenate(emb_list, axis=0)
                 print(f"[DEBUG] Finished query encoding; query_emb shape: {query_emb.shape}")
                 if use_cache and query_cache_file:
                     print(f"Saving query embeddings to cache: {query_cache_file}")
@@ -684,7 +609,7 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run ReasonIR-8B model for information retrieval",
+        description="Run GritLM-7B for information retrieval (embedding + FAISS/brute-force, cache keyed by doc/query content)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -741,7 +666,7 @@ Examples:
         "--index-name",
         type=str,
         default=None,
-        help="Name for the FAISS index (default: 'ReasonIR-8B-QUEST')"
+        help="Name for the FAISS index (default: 'GritLM-7B-QUEST')"
     )
     
     parser.add_argument(
@@ -768,7 +693,7 @@ Examples:
     parser.add_argument(
         "--no-fp16",
         action="store_true",
-        help="Disable float16 precision (use full float32). Note: Using AutoModel with torch_dtype='auto' enables bf16 which is faster."
+        help="Disable fp16/bf16 (use full float32). GritLM uses torch_dtype='auto' by default."
     )
     
     parser.add_argument(
@@ -821,20 +746,6 @@ Examples:
         type=int,
         default=None,
         help="Limit to the first N queries (for debugging / small runs)."
-    )
-
-    parser.add_argument(
-        "--query-instruction",
-        type=str,
-        default=None,
-        help="Instruction for query encoding (default: 'Given a query, retrieve relevant documents that answer the query'). Same concept as GritLM query instruction."
-    )
-
-    parser.add_argument(
-        "--doc-instruction",
-        type=str,
-        default=None,
-        help="Instruction for document encoding (default: empty). Same concept as GritLM doc instruction."
     )
 
     parser.add_argument(
@@ -893,8 +804,6 @@ Examples:
         use_multigpu=args.multigpu,
         max_docs=args.max_docs,
         max_queries=args.max_queries,
-        query_instruction_raw=args.query_instruction,
-        doc_instruction_raw=args.doc_instruction,
         task_suffix=args.task_suffix,
         query_format=query_fmt,
         corpus_format=corpus_fmt,
