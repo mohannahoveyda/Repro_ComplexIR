@@ -92,6 +92,12 @@ MAX_LENGTH="${MAX_LENGTH:-4096}"  # Maximum sequence length
 MAX_DOCS="${MAX_DOCS:-}"          # If set, limit to first N documents
 MAX_QUERIES="${MAX_QUERIES:-}"    # If set, limit to first N queries
 
+# QUEST withVariants: distinct cache/output (set by run_reasonir_example.sh --quest_plus)
+TASK_SUFFIX="${TASK_SUFFIX:-}"
+INDEX_NAME="${INDEX_NAME:-}"
+QUERY_FORMAT="${QUERY_FORMAT:-}"
+CORPUS_FORMAT="${CORPUS_FORMAT:-}"
+
 # Performance optimization options
 AUTO_BATCH="${AUTO_BATCH:-0}"  # Auto-tune batch sizes (default: disabled)
 USE_MULTIGPU="${USE_MULTIGPU:-0}"  # Use multiple GPUs if available (default: disabled)
@@ -126,6 +132,10 @@ echo "INSPECT_BATCHES: ${INSPECT_BATCHES:-not set}"
 if [ -n "$MAX_DOCS" ] || [ -n "$MAX_QUERIES" ]; then
     echo "SUBSET: MAX_DOCS=$MAX_DOCS MAX_QUERIES=$MAX_QUERIES"
 fi
+[ -n "$TASK_SUFFIX" ] && echo "Task suffix: $TASK_SUFFIX"
+[ -n "$INDEX_NAME" ] && echo "Index name: $INDEX_NAME"
+[ -n "$QUERY_FORMAT" ] && echo "Query format: $QUERY_FORMAT"
+[ -n "$CORPUS_FORMAT" ] && echo "Corpus format: $CORPUS_FORMAT"
 echo "=========================================="
 
 # Build command with optional arguments
@@ -144,6 +154,9 @@ CMD="python code/baselines/reasonir/reasonir-8b.py \
 [ -n "$INDEX_NAME" ] && CMD="$CMD --index-name \"$INDEX_NAME\""
 [ "$USE_CACHE" = "0" ] && CMD="$CMD --no-cache"
 [ -n "$CACHE_DIR" ] && CMD="$CMD --cache-dir \"$CACHE_DIR\""
+[ -n "$TASK_SUFFIX" ] && CMD="$CMD --task-suffix \"$TASK_SUFFIX\""
+[ -n "$QUERY_FORMAT" ] && CMD="$CMD --query-format \"$QUERY_FORMAT\""
+[ -n "$CORPUS_FORMAT" ] && CMD="$CMD --corpus-format \"$CORPUS_FORMAT\""
 [ "$USE_FAISS" = "0" ] && CMD="$CMD --no-faiss"
 # Map subset controls to new Python arguments
 if [ -n "$MAX_DOCS" ]; then
