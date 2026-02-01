@@ -31,5 +31,11 @@ outputs/runs/reasonir-8b/
 
 benchmarks.csv
 ReasonIR-8B-QUEST
-
+GritLM-7B-QUEST
+Promptriever-7B-QUEST
+outputs/runs/gritlm-7b/GritLM-7B-QUEST_withVariants
+outputs/runs/promptriever-7b/Promptriever-7B-QUEST_withVariants 
+outputs/runs/reasonir-8b/ReasonIR-8B-QUEST_withVariants
 /code/evaluation/EVALUATION_NOTES.md
+
+outputs/runs/

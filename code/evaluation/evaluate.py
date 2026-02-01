@@ -13,10 +13,23 @@ Computes:
 
 import argparse
 import json
+import os
 from collections import defaultdict
 from typing import Dict, List, Optional, Set
 
 import numpy as np
+
+# Default quest_plus corpus path (relative to repo root), used when --dataset quest_plus
+_QUEST_PLUS_CORPUS_REL = os.path.join(
+    "data", "QUEST_w_Variants", "data", "quest_text_w_id_withVarients.jsonl"
+)
+
+
+def _default_quest_plus_corpus_path() -> str:
+    """Return absolute path to quest_plus corpus from this script's repo root."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(os.path.dirname(script_dir))  # code/evaluation -> repo root
+    return os.path.join(repo_root, _QUEST_PLUS_CORPUS_REL)
 
 
 def load_qrels(qrels_path: str) -> Dict[str, Set[str]]:
@@ -66,6 +79,43 @@ def load_qrels(qrels_path: str) -> Dict[str, Set[str]]:
                 qrels[qid].add(docid)
     
     return dict(qrels)
+
+
+def load_title_to_docid(corpus_path: str) -> Dict[str, str]:
+    """
+    Load corpus JSONL and build a mapping from document title to document ID (idx).
+    Used for quest_plus when the run file contains titles but qrels contain doc IDs.
+
+    Returns:
+        Dict mapping title (str) to doc_id (str, e.g. quest_0, quest_94648)
+    """
+    title_to_id = {}
+    with open(corpus_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            title = obj.get("title")
+            doc_id = obj.get("idx") or obj.get("id")
+            if title is not None and doc_id is not None:
+                title_to_id[str(title).strip()] = str(doc_id)
+    return title_to_id
+
+
+def _remap_run_docids(
+    runs: Dict[str, List[tuple]],
+    title_to_docid: Dict[str, str],
+) -> None:
+    """In-place: replace doc_id (title) with corpus doc_id in runs."""
+    for qid in runs:
+        new_list = []
+        for doc_id, rank, score in runs[qid]:
+            mapped_id = title_to_docid.get(doc_id, doc_id)
+            new_list.append((mapped_id, rank, score))
+        runs[qid] = new_list
 
 
 def load_trec_run(run_path: str) -> Dict[str, List[tuple]]:
@@ -340,7 +390,17 @@ def main():
         default="quest",
         help="Which dataset block to fill in the LaTeX row: quest (first 6 cols) or quest_plus (last 6 cols). Used with --latex.",
     )
+    parser.add_argument(
+        "--corpus",
+        type=str,
+        default=None,
+        help="Path to quest_plus corpus JSONL (title, text, idx). When --dataset quest_plus, this is auto-set to the repo quest_plus corpus unless overridden.",
+    )
     args = parser.parse_args()
+
+    # Auto-select quest_plus corpus when dataset is quest_plus and --corpus not given
+    if args.dataset == "quest_plus" and args.corpus is None:
+        args.corpus = _default_quest_plus_corpus_path()
 
     # Resolve run(s): either single --run or --compare RUN1 RUN2
     if args.compare is not None:
@@ -358,16 +418,31 @@ def main():
     qrels = load_qrels(args.qrels)
     print(f"[evaluation] Loaded {len(qrels)} queries with ground truth")
 
+    # Title -> doc_id mapping for quest_plus (run file has titles, qrels have doc IDs)
+    title_to_docid = None
+    if args.corpus:
+        if os.path.isfile(args.corpus):
+            print(f"[evaluation] Loading quest_plus corpus for title->docid mapping: {args.corpus}")
+            title_to_docid = load_title_to_docid(args.corpus)
+            print(f"[evaluation] Loaded {len(title_to_docid)} title->docid mappings")
+        else:
+            print(f"[evaluation] WARNING: quest_plus corpus not found at {args.corpus}; run doc_ids will not be mapped (scores may be 0)")
+
     # Build query subset: overlapping queries, optionally limited to first N (sorted)
     if compare_mode:
         print(f"[evaluation] Loading run 1: {args.compare[0]}")
         runs1 = load_trec_run(args.compare[0])
         print(f"[evaluation] Loading run 2: {args.compare[1]}")
         runs2 = load_trec_run(args.compare[1])
+        if title_to_docid:
+            _remap_run_docids(runs1, title_to_docid)
+            _remap_run_docids(runs2, title_to_docid)
         overlapping = sorted(set(qrels.keys()) & set(runs1.keys()) & set(runs2.keys()))
     else:
         print(f"[evaluation] Loading run file from: {args.run}")
         runs = load_trec_run(args.run)
+        if title_to_docid:
+            _remap_run_docids(runs, title_to_docid)
         print(f"[evaluation] Loaded {len(runs)} queries in run file")
         overlapping = sorted(set(qrels.keys()) & set(runs.keys()))
     if args.max_queries is not None:
