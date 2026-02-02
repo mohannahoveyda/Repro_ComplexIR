@@ -7,6 +7,9 @@ import pandas as pd
 from datetime import datetime
 from datasets import load_dataset
 from contextlib import contextmanager
+from sentence_transformers import SparseEncoder
+from splade_index import SPLADE
+import numpy as np
 
 def queries(PATH, quest_plus = False):
     '''
@@ -165,6 +168,51 @@ def start_retrieval(PATH, qS, truth, doc_ids, title_map, top_indices, top_scores
             output_obj = {"query": q_text, "relevant": relevant_titles, "retrieved": format}
             f_out.write(json.dumps(output_obj) + "\n")
 
+def create_sparse_index(INDEX_PATH, device, documents, model_name):
+    '''
+        Functionality:
+
+            Initializes a SPLADE retriever (does embedding as well), indexes a corpus, and saves it.
+    
+        Input:
+
+            INDEX_PATH - path (name) for index        
+            documents - non embedded documents
+            model_name - The model path
+        
+        Usage:
+
+            retriever = create_sparse_index(INDEX_PATH, device, doc_texts, MODEL_NAME)
+    '''
+    model = SparseEncoder(model_name, deviceP=device, token=None) # specify your access token for gated model
+    retriever = SPLADE()
+
+    retriever.index(model=model, documents=documents)
+
+    retriever.save(INDEX_PATH)
+
+    return retriever
+
+def search_sparse_index(retriever, queries, top_k= 100):
+    '''
+        Functionality:
+        
+            get scores and distances for queries
+
+        Input: 
+
+            retriever - sparse index
+            queries - non embedded documents
+            top_k - retrieve top k documents (set to 100)
+
+        Usage:
+
+            scores, indices = search_sparse_index(retriever, query)
+    '''
+    results = retriever.retrieve(queries, k=top_k)
+
+    return results.scores, results.doc_ids
+
 def create_index(INDEX_NAME, query_emb, doc_emb):
     '''
         Functionality:
@@ -199,6 +247,7 @@ def create_index(INDEX_NAME, query_emb, doc_emb):
 def search_index(index, query_emb, top_k= 100):
     '''
         Functionality:
+
             get scores and distances for queries
 
         Input: 
