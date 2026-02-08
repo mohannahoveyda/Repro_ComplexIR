@@ -130,7 +130,7 @@ def documents_limit():
 
     ids = ds["_id"]
     texts = ds["text"]
-    title_map = {row["_id"]: row.get("title", "") for row in ds} 
+    title_map = {row["_id"]: row.get("_id", "") for row in ds} 
 
     return ids, texts, title_map
 
