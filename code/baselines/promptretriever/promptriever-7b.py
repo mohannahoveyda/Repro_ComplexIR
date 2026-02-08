@@ -105,7 +105,7 @@ class Promptriever:
             batch_texts = sentences[i : i + batch_size]
             batch_dict = self._create_batch_dict(batch_texts, max_length)
             batch_dict = {k: v.to(dev) for k, v in batch_dict.items()}
-            with torch.cuda.amp.autocast(enabled=(dev.type == "cuda")):
+            with torch.amp.autocast("cuda", enabled=(str(dev.type) == "cuda")):
                 with torch.no_grad():
                     outputs = self.model(**batch_dict)
                     last_hidden = outputs.last_hidden_state
@@ -130,6 +130,19 @@ def promptriever_query_instruction(raw_instruction):
 def promptriever_doc_instruction(raw_instruction):
     """Format for doc encoding: 'passage:  {d}' (doc instruction typically empty)."""
     return (raw_instruction or "").strip()
+
+
+def _safe_save_npy(path, arr):
+    """Save numpy array; on OSError (quota/disk) raise with a helpful message."""
+    try:
+        np.save(path, arr)
+    except OSError as e:
+        raise OSError(
+            f"Failed to write cache file '{path}' ({e}). "
+            "Common causes: disk full or quota exceeded (e.g. on home/GPFS). "
+            "Try: 1) Use --no-cache to skip caching, or 2) Set CACHE_DIR to a path on scratch "
+            "with more space (e.g. $TMPDIR or /scratch/$USER)."
+        ) from e
 
 
 def content_hash(texts):
@@ -214,7 +227,7 @@ def encode_worker(gpu_id, model_name, texts_chunk, batch_size, max_length, resul
         print(f"[GPU {gpu_id} Process] Encoded -> shape {embeddings.shape}")
         os.makedirs(temp_dir, exist_ok=True)
         shard_path = os.path.join(temp_dir, f"gpu_{gpu_id}.npy")
-        np.save(shard_path, embeddings)
+        _safe_save_npy(shard_path, embeddings)
         result_queue.put((gpu_id, shard_path))
         del model
         import gc
@@ -386,7 +399,7 @@ def main(
         model = Promptriever(MODEL_NAME, device=device_obj)
         print(f"Model loaded successfully.")
 
-    QUERY_INSTRUCTION_RAW_DEFAULT = "Given a web search query, retrieve the most relevant documents"
+    QUERY_INSTRUCTION_RAW_DEFAULT = "Given the query, retrieve the most relevant documents"
     q_inst = promptriever_query_instruction(
         query_instruction_raw if query_instruction_raw is not None else QUERY_INSTRUCTION_RAW_DEFAULT
     )
@@ -463,10 +476,26 @@ def main(
                 for start_idx in range(0, total_docs, DOC_SHARD_SIZE):
                     end_idx = min(start_idx + DOC_SHARD_SIZE, total_docs)
                     shard_path = os.path.join(doc_shard_dir, f"emb_{start_idx:07d}_{end_idx:07d}.npy")
+                    expected_rows = end_idx - start_idx
+                    shard_loaded = False
                     if os.path.isfile(shard_path):
-                        print(f"Loading cached document shard {start_idx}-{end_idx-1}")
-                        emb_chunk = np.load(shard_path, allow_pickle=True)
-                    else:
+                        try:
+                            emb_chunk = np.load(shard_path, allow_pickle=True)
+                            if emb_chunk.shape[0] == expected_rows:
+                                shard_loaded = True
+                                print(f"Loading cached document shard {start_idx}-{end_idx-1}")
+                            else:
+                                print(f"Invalid cached shard shape {emb_chunk.shape} (expected {expected_rows} rows); re-encoding.")
+                        except (ValueError, OSError) as e:
+                            print(f"Failed to load shard {shard_path}: {e}; re-encoding.")
+                        if not shard_loaded and os.path.isfile(shard_path):
+                            try:
+                                os.remove(shard_path)
+                            except OSError:
+                                pass
+                    if not shard_loaded:
+                        num_in_shard = end_idx - start_idx
+                        print(f"Encoding document shard {start_idx}-{end_idx-1} ({num_in_shard} docs)...")
                         shard_texts = processed_documents[start_idx:end_idx]
                         if use_multigpu and num_gpus > 1:
                             emb_chunk = encode_with_multigpu(
@@ -480,11 +509,13 @@ def main(
                                     max_length=max_length,
                                 )
                         if use_cache:
-                            np.save(shard_path, emb_chunk)
+                            _safe_save_npy(shard_path, emb_chunk)
+                            print(f"Saved document shard {start_idx}-{end_idx-1} to cache")
                     doc_emb_chunks.append(emb_chunk)
                 doc_emb = np.concatenate(doc_emb_chunks, axis=0)
+                print(f"[DEBUG] Finished document encoding; doc_emb shape: {doc_emb.shape}")
                 if use_cache and doc_cache_file:
-                    np.save(doc_cache_file, doc_emb)
+                    _safe_save_npy(doc_cache_file, doc_emb)
             else:
                 print(f"Encoding {len(processed_documents)} documents...")
                 if use_multigpu and num_gpus > 1:
@@ -500,7 +531,7 @@ def main(
                         )
                 print(f"[DEBUG] Finished document encoding; doc_emb shape: {doc_emb.shape}")
                 if use_cache and doc_cache_file:
-                    np.save(doc_cache_file, doc_emb)
+                    _safe_save_npy(doc_cache_file, doc_emb)
 
         if device == "cuda":
             torch.cuda.empty_cache()
@@ -522,10 +553,26 @@ def main(
                 for start_idx in range(0, total_queries, QUERY_SHARD_SIZE):
                     end_idx = min(start_idx + QUERY_SHARD_SIZE, total_queries)
                     shard_path = os.path.join(query_shard_dir, f"emb_{start_idx:07d}_{end_idx:07d}.npy")
+                    expected_rows = end_idx - start_idx
+                    shard_loaded = False
                     if os.path.isfile(shard_path):
-                        print(f"Loading cached query shard {start_idx}-{end_idx-1}")
-                        emb_chunk = np.load(shard_path, allow_pickle=True)
-                    else:
+                        try:
+                            emb_chunk = np.load(shard_path, allow_pickle=True)
+                            if emb_chunk.shape[0] == expected_rows:
+                                shard_loaded = True
+                                print(f"Loading cached query shard {start_idx}-{end_idx-1}")
+                            else:
+                                print(f"Invalid cached query shard shape {emb_chunk.shape} (expected {expected_rows} rows); re-encoding.")
+                        except (ValueError, OSError) as e:
+                            print(f"Failed to load query shard {shard_path}: {e}; re-encoding.")
+                        if not shard_loaded and os.path.isfile(shard_path):
+                            try:
+                                os.remove(shard_path)
+                            except OSError:
+                                pass
+                    if not shard_loaded:
+                        num_in_shard = end_idx - start_idx
+                        print(f"Encoding query shard {start_idx}-{end_idx-1} ({num_in_shard} queries)...")
                         shard_queries = processed_queries[start_idx:end_idx]
                         if use_multigpu and num_gpus > 1:
                             emb_chunk = encode_with_multigpu(
@@ -539,11 +586,12 @@ def main(
                                     max_length=max_length,
                                 )
                         if use_cache:
-                            np.save(shard_path, emb_chunk)
+                            _safe_save_npy(shard_path, emb_chunk)
+                            print(f"Saved query shard {start_idx}-{end_idx-1} to cache")
                     query_emb_chunks.append(emb_chunk)
                 query_emb = np.concatenate(query_emb_chunks, axis=0)
                 if use_cache and query_cache_file:
-                    np.save(query_cache_file, query_emb)
+                    _safe_save_npy(query_cache_file, query_emb)
             else:
                 print(f"Encoding {len(processed_queries)} queries...")
                 if use_multigpu and num_gpus > 1:
@@ -559,7 +607,7 @@ def main(
                         )
                 print(f"[DEBUG] Finished query encoding; query_emb shape: {query_emb.shape}")
                 if use_cache and query_cache_file:
-                    np.save(query_cache_file, query_emb)
+                    _safe_save_npy(query_cache_file, query_emb)
 
     print("Computing similarity scores...")
     if use_faiss:

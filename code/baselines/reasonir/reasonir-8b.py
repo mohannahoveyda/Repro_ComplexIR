@@ -531,10 +531,24 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
                 for start_idx in range(0, total_docs, DOC_SHARD_SIZE):
                     end_idx = min(start_idx + DOC_SHARD_SIZE, total_docs)
                     shard_path = os.path.join(doc_shard_dir, f"emb_{start_idx:07d}_{end_idx:07d}.npy")
+                    expected_rows = end_idx - start_idx
+                    shard_loaded = False
                     if os.path.isfile(shard_path):
-                        print(f"Loading cached document shard {start_idx}-{end_idx-1} from {shard_path}")
-                        emb_chunk = np.load(shard_path, allow_pickle=True)
-                    else:
+                        try:
+                            emb_chunk = np.load(shard_path, allow_pickle=True)
+                            if emb_chunk.shape[0] == expected_rows:
+                                shard_loaded = True
+                                print(f"Loading cached document shard {start_idx}-{end_idx-1} from {shard_path}")
+                            else:
+                                print(f"Invalid cached shard shape {emb_chunk.shape} (expected {expected_rows} rows); re-encoding.")
+                        except (ValueError, OSError) as e:
+                            print(f"Failed to load shard {shard_path}: {e}; re-encoding.")
+                        if not shard_loaded and os.path.isfile(shard_path):
+                            try:
+                                os.remove(shard_path)
+                            except OSError:
+                                pass
+                    if not shard_loaded:
                         print(f"Encoding document shard {start_idx}-{end_idx-1} ({end_idx-start_idx} docs)...")
                         shard_texts = doc_texts[start_idx:end_idx]
                         if use_multigpu and num_gpus > 1:
@@ -604,10 +618,24 @@ def main(quest_plus=False, query_file=None, corpus_file=None, output_file=None,
                 for start_idx in range(0, total_queries, QUERY_SHARD_SIZE):
                     end_idx = min(start_idx + QUERY_SHARD_SIZE, total_queries)
                     shard_path = os.path.join(query_shard_dir, f"emb_{start_idx:07d}_{end_idx:07d}.npy")
+                    expected_rows = end_idx - start_idx
+                    shard_loaded = False
                     if os.path.isfile(shard_path):
-                        print(f"Loading cached query shard {start_idx}-{end_idx-1} from {shard_path}")
-                        emb_chunk = np.load(shard_path, allow_pickle=True)
-                    else:
+                        try:
+                            emb_chunk = np.load(shard_path, allow_pickle=True)
+                            if emb_chunk.shape[0] == expected_rows:
+                                shard_loaded = True
+                                print(f"Loading cached query shard {start_idx}-{end_idx-1} from {shard_path}")
+                            else:
+                                print(f"Invalid cached query shard shape {emb_chunk.shape} (expected {expected_rows} rows); re-encoding.")
+                        except (ValueError, OSError) as e:
+                            print(f"Failed to load query shard {shard_path}: {e}; re-encoding.")
+                        if not shard_loaded and os.path.isfile(shard_path):
+                            try:
+                                os.remove(shard_path)
+                            except OSError:
+                                pass
+                    if not shard_loaded:
                         print(f"Encoding query shard {start_idx}-{end_idx-1} ({end_idx-start_idx} queries)...")
                         shard_queries = query[start_idx:end_idx]
                         if use_multigpu and num_gpus > 1:
