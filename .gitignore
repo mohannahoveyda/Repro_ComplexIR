@@ -43,3 +43,6 @@ outputs/runs/
 Contriever-QUEST
 
 *.md
+*.csv
+*.tsv
+*.png
