@@ -37,27 +37,45 @@ def embed_texts(texts, model, tokenizer, device, batch_size=64):
     return np.vstack(all_embs)
 
 
-def main(quest_plus):
-    if quest_plus:
+def main(plus, limit):
+    if not limit and plus:  # QUEST_VAR
         query_path = "./data/QUEST_VAR/quest_test_withVarients.jsonl"
         doc_path = "./data/QUEST_VAR/quest_text_w_id_withVarients.jsonl"
         output_file = "contriever_QUEST_VAR_r01"
         index_name = "contriever_QUEST_VAR_index"
-    else:
+    elif not limit and not plus:  # QUEST
         query_path = "./data/QUEST/test.jsonl"
         doc_path = "./data/QUEST/documents.jsonl"
         output_file = "contriever_QUEST_r01"
         index_name = "contriever_QUEST_index"
+    elif limit and not plus:  # LIMIT
+        query_path = "./data/LIMIT/queries.jsonl"
+        qrels_path = "./data/LIMIT/qrels.jsonl"
+        doc_path = "./data/LIMIT/corpus.jsonl"
+        output_file = "contriever_LIMIT_r01"
+        index_name = "contriever_LIMIT_index"
+    elif limit and plus:  # LIMIT+
+        query_path = "./data/LIMIT+/limit_quest_queries.jsonl"
+        qrels_path = "./data/LIMIT/qrels.jsonl"
+        doc_path = "./data/LIMIT+/corpus.jsonl"
+        output_file = "contriever_LIMIT+_r01"
+        index_name = "contriever_LIMIT+_index"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
     print("Loading documents...")
-    doc_ids, doc_texts, doc_titles = utils.documents(doc_path, quest_plus=quest_plus)
+    if not limit:
+        doc_ids, doc_texts, doc_titles = utils.documents(doc_path, quest_plus=plus)
+    else:
+        doc_ids, doc_texts, doc_titles = utils.documents_limit(doc_path, plus=plus)
     print(f"Loaded {len(doc_ids)} documents!")
 
     print("Loading queries...")
-    queries, truths = utils.queries(query_path, quest_plus=quest_plus)
+    if not limit:
+        queries, truths = utils.queries(query_path, quest_plus=plus)
+    else:
+        queries, truths = utils.queries_limit(query_path, qrels_path, plus=plus)
     print(f"Loaded {len(queries)} queries!")
 
     print("Loading Contriever model and tokenizer...")
@@ -80,5 +98,6 @@ def main(quest_plus):
 
 
 if __name__ == "__main__":
-    quest_plus = True
-    main(quest_plus)
+    plus = False  # Set to True for QUEST_VAR and LIMIT+
+    limit = True  # Set to True for LIMIT and LIMIT+
+    main(plus, limit)
