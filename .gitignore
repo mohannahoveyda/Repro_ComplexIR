@@ -46,3 +46,6 @@ Contriever-QUEST
 *.csv
 *.tsv
 *.png
+*.txt
+# Cost estimation cache
+.cost_cache/
