@@ -24,12 +24,36 @@ _QUEST_PLUS_CORPUS_REL = os.path.join(
     "data", "QUEST_w_Variants", "data", "quest_text_w_id_withVarients.jsonl"
 )
 
+# Default LIMIT / LIMIT+ data paths (relative to repo root)
+_LIMIT_DATA_REL = os.path.join(
+    "code", "data_generation_utils", "limit_plus", "limit_data",
+)
+
+
+def _repo_root() -> str:
+    """Return absolute path to the repo root (two levels up from this script)."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.dirname(os.path.dirname(script_dir))  # code/evaluation -> repo root
+
 
 def _default_quest_plus_corpus_path() -> str:
     """Return absolute path to quest_plus corpus from this script's repo root."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.dirname(os.path.dirname(script_dir))  # code/evaluation -> repo root
-    return os.path.join(repo_root, _QUEST_PLUS_CORPUS_REL)
+    return os.path.join(_repo_root(), _QUEST_PLUS_CORPUS_REL)
+
+
+def _default_limit_qrels_path() -> str:
+    """Return absolute path to the LIMIT BEIR-style qrels.jsonl."""
+    return os.path.join(_repo_root(), _LIMIT_DATA_REL, "qrels.jsonl")
+
+
+def _default_limit_queries_path() -> str:
+    """Return absolute path to the LIMIT test queries file."""
+    return os.path.join(_repo_root(), _LIMIT_DATA_REL, "queries.jsonl")
+
+
+def _default_limit_plus_queries_path() -> str:
+    """Return absolute path to the LIMIT+ test queries file."""
+    return os.path.join(_repo_root(), _LIMIT_DATA_REL, "limit_quest_queries.jsonl")
 
 
 def load_qrels(qrels_path: str) -> Dict[str, Set[str]]:
@@ -79,6 +103,91 @@ def load_qrels(qrels_path: str) -> Dict[str, Set[str]]:
                 qrels[qid].add(docid)
     
     return dict(qrels)
+
+
+def load_qrels_jsonl(qrels_path: str) -> Dict[str, Set[str]]:
+    """
+    Load ground truth from a BEIR-style JSONL qrels file.
+
+    Format per line: ``{"query-id": "q1", "corpus-id": "d1", "score": 1}``
+
+    Returns:
+        Dict mapping query_id (str) to set of relevant document IDs
+    """
+    qrels: Dict[str, Set[str]] = defaultdict(set)
+
+    with open(qrels_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            qid = str(data.get("query-id", ""))
+            docid = str(data.get("corpus-id", ""))
+            score = data.get("score", 0)
+            if qid and docid and int(score) > 0:
+                qrels[qid].add(docid)
+
+    return dict(qrels)
+
+
+def load_qrels_from_test_file(test_file_path: str) -> Dict[str, Set[str]]:
+    """
+    Build ground truth from a test queries file with inline relevance.
+
+    Supports:
+    - LIMIT+ format: ``{"id": 0, "query": "...", "docs": ["doc1", ...]}``
+    - Any JSONL with ``_id`` or ``id`` and a ``docs`` list.
+
+    Returns:
+        Dict mapping query_id (str) to set of relevant document IDs
+    """
+    qrels: Dict[str, Set[str]] = defaultdict(set)
+
+    with open(test_file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            qid = data.get("_id")
+            if qid is None:
+                qid = data.get("id")
+            if qid is None:
+                continue
+            qid = str(qid)
+            docs = data.get("docs", [])
+            for doc in docs:
+                qrels[qid].add(str(doc))
+
+    return dict(qrels)
+
+
+def load_qrels_auto(qrels_path: str) -> Dict[str, Set[str]]:
+    """
+    Auto-detect qrels format and load.
+
+    - If the file looks like JSONL (first non-empty line is valid JSON),
+      load as BEIR JSONL.
+    - Otherwise fall back to TREC whitespace format.
+    """
+    with open(qrels_path, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                json.loads(stripped)
+                # First non-empty line is JSON -> JSONL format
+                return load_qrels_jsonl(qrels_path)
+            except (json.JSONDecodeError, ValueError):
+                break
+    # Fall back to TREC format
+    return load_qrels(qrels_path)
 
 
 def load_title_to_docid(corpus_path: str) -> Dict[str, str]:
@@ -329,8 +438,12 @@ def main():
     parser.add_argument(
         "--qrels",
         type=str,
-        required=True,
-        help="Path to TREC qrels file (qid 0 docid relevance)",
+        default=None,
+        help=(
+            "Path to qrels file.  Accepts TREC format (qid 0 docid relevance) "
+            "or BEIR JSONL format (auto-detected).  Optional for --dataset "
+            "limit / limit_plus (auto-resolved from repo paths)."
+        ),
     )
     parser.add_argument(
         "--cutoffs",
@@ -386,9 +499,31 @@ def main():
     parser.add_argument(
         "--dataset",
         type=str,
-        choices=["quest", "quest_plus"],
+        choices=["quest", "quest_plus", "limit", "limit_plus"],
         default="quest",
-        help="Which dataset block to fill in the LaTeX row: quest (first 6 cols) or quest_plus (last 6 cols). Used with --latex.",
+        help=(
+            "Dataset being evaluated.  Controls LaTeX column placement and "
+            "auto-paths.  For 'limit' the BEIR JSONL qrels are loaded "
+            "automatically; for 'limit_plus' ground truth is read from the "
+            "test queries file."
+        ),
+    )
+    parser.add_argument(
+        "--test-file",
+        type=str,
+        default=None,
+        help=(
+            "Path to a test queries JSONL file with inline relevance "
+            "(e.g. LIMIT+ limit_quest_queries.jsonl).  When provided, "
+            "qrels are built from the 'docs' field instead of --qrels."
+        ),
+    )
+    parser.add_argument(
+        "--latex-order",
+        type=str,
+        choices=["recall_first", "ndcg_first"],
+        default="recall_first",
+        help="LaTeX column order: recall_first (R@5,20,100, N@5,20,100) or ndcg_first (N@5,20,100, R@5,20,100). Cutoffs always 5,20,100.",
     )
     parser.add_argument(
         "--corpus",
@@ -402,6 +537,21 @@ def main():
     if args.dataset == "quest_plus" and args.corpus is None:
         args.corpus = _default_quest_plus_corpus_path()
 
+    # ---- Auto-resolve paths for LIMIT / LIMIT+ datasets ----
+    if args.dataset == "limit":
+        if args.qrels is None:
+            args.qrels = _default_limit_qrels_path()
+    elif args.dataset == "limit_plus":
+        if args.test_file is None:
+            args.test_file = _default_limit_plus_queries_path()
+
+    # Ensure we have at least one source of ground truth
+    if args.qrels is None and args.test_file is None:
+        parser.error(
+            "Either --qrels or --test-file is required (auto-resolved for "
+            "--dataset limit / limit_plus)."
+        )
+
     # Resolve run(s): either single --run or --compare RUN1 RUN2
     if args.compare is not None:
         run_path_1, run_path_2 = args.compare
@@ -414,8 +564,14 @@ def main():
         run_path_1 = run_path_2 = None
         compare_mode = False
 
-    print(f"[evaluation] Loading ground truth from: {args.qrels}")
-    qrels = load_qrels(args.qrels)
+    # ---- Load ground truth ----
+    if args.test_file:
+        # Build qrels from test file with inline docs (LIMIT+ or similar)
+        print(f"[evaluation] Building ground truth from test file: {args.test_file}")
+        qrels = load_qrels_from_test_file(args.test_file)
+    else:
+        print(f"[evaluation] Loading ground truth from: {args.qrels}")
+        qrels = load_qrels_auto(args.qrels)
     print(f"[evaluation] Loaded {len(qrels)} queries with ground truth")
 
     # Title -> doc_id mapping for quest_plus (run file has titles, qrels have doc IDs)
@@ -514,19 +670,26 @@ def main():
             json.dump(output_data, f, indent=2)
         print(f"\n[evaluation] Results saved to: {args.output}")
 
-    # LaTeX table row (order: Recall@5,20,100, nDCG@5,20,100 for each block)
+    # LaTeX table row: 12 data columns split into two 6-column blocks.
+    #   Block order per dataset pair:
+    #     first half  = quest  or limit
+    #     second half = quest_plus or limit_plus
+    #   Within each block: nDCG@5,20,100  then  Recall@5,20,100
+    # Uses \num{} from siunitx for number formatting.
     if args.latex:
         def fmt(v: float) -> str:
-            return f"\\n{{{v:.4f}}}"
-        place = "\\n{0.0}"
+            return f"\\num{{{v:.4f}}}"
+        place = "\\num{0.0}"
         cutoffs = args.cutoffs
         r_vals = [fmt(results["recall"][k]) for k in cutoffs]
         n_vals = [fmt(results["ndcg"][k]) for k in cutoffs]
-        quest_block = " & ".join(r_vals + n_vals)
-        if args.dataset == "quest":
-            line = f"{args.model_name} & &\n{quest_block} &\n{place} & {place} & {place} & {place} & {place} & {place} \\\\\n"
+        data_block = " & ".join(r_vals + n_vals)
+        placeholder_block = " & ".join([place] * 6)
+        # quest / limit → first half;  quest_plus / limit_plus → second half
+        if args.dataset in ("quest", "limit"):
+            line = f"{args.model_name} & &\n{data_block} &\n{placeholder_block} \\\\\n"
         else:
-            line = f"{args.model_name} & &\n{place} & {place} & {place} & {place} & {place} & {place} &\n{quest_block} \\\\\n"
+            line = f"{args.model_name} & &\n{placeholder_block} &\n{data_block} \\\\\n"
         print("\n[LaTeX row]\n" + line)
 
 

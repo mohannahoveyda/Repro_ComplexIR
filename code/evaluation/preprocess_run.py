@@ -25,7 +25,109 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
 
 
-def parse_reasonir_jsonl_line(line: str, line_num: int) -> Optional[List[Tuple[str, str, float]]]:
+def load_query_ids(test_queries_path: str) -> List[str]:
+    """
+    Load query IDs from a test queries file (one ID per line, in file order).
+
+    Supports:
+    - LIMIT / BEIR format: ``{"_id": "query_0", "text": "..."}``
+    - LIMIT+ format: ``{"id": 0, "query": "...", "docs": [...]}``
+
+    Returns:
+        List of query IDs (strings) in the order they appear in the file.
+    """
+    query_ids: List[str] = []
+    with open(test_queries_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            # Try _id first (LIMIT / BEIR), then id (LIMIT+)
+            qid = data.get("_id")
+            if qid is None:
+                qid = data.get("id")
+            if qid is not None:
+                query_ids.append(str(qid))
+    return query_ids
+
+
+def generate_trec_qrels(
+    output_path: str,
+    qrels_jsonl_path: Optional[str] = None,
+    test_queries_path: Optional[str] = None,
+) -> None:
+    """
+    Generate a TREC-format qrels file from LIMIT / LIMIT+ data.
+
+    Two modes (at least one source must be provided):
+
+    1. **qrels_jsonl_path** – BEIR-style JSONL
+       (``{"query-id": "q1", "corpus-id": "d1", "score": 1}``).
+    2. **test_queries_path** – LIMIT+ test file with inline relevance
+       (``{"id": 0, "query": "...", "docs": ["doc1", ...]}``) or
+       LIMIT test file with ``_id`` and ``docs``.
+
+    Writes TREC qrels: ``qid 0 docid relevance``
+    """
+    lines: List[str] = []
+
+    if qrels_jsonl_path and os.path.isfile(qrels_jsonl_path):
+        # Mode 1: BEIR JSONL qrels
+        with open(qrels_jsonl_path, "r", encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                qid = str(data.get("query-id", ""))
+                docid = str(data.get("corpus-id", ""))
+                score = data.get("score", 0)
+                if qid and docid and int(score) > 0:
+                    lines.append(f"{qid} 0 {docid} {int(score)}")
+
+    if test_queries_path and os.path.isfile(test_queries_path):
+        # Mode 2: test file with inline docs
+        with open(test_queries_path, "r", encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                qid = data.get("_id")
+                if qid is None:
+                    qid = data.get("id")
+                if qid is None:
+                    continue
+                qid = str(qid)
+                docs = data.get("docs", [])
+                for doc in docs:
+                    lines.append(f"{qid} 0 {doc} 1")
+
+    if not lines:
+        print("[preprocess] WARNING: No qrels generated – check source paths.")
+        return
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    # Count unique queries
+    unique_qids = set(l.split()[0] for l in lines)
+    print(f"[preprocess] Wrote TREC qrels ({len(unique_qids)} queries, {len(lines)} judgments) to: {output_path}")
+
+
+def parse_reasonir_jsonl_line(
+    line: str, line_num: int, qid_override: Optional[str] = None,
+) -> Optional[List[Tuple[str, str, float]]]:
     """
     Parse a ReasonIR JSONL line (one object per query).
     
@@ -49,9 +151,11 @@ def parse_reasonir_jsonl_line(line: str, line_num: int) -> Optional[List[Tuple[s
     except json.JSONDecodeError:
         return None
     retrieved = data.get("retrieved", [])
-    if not retrieved or not isinstance(retrieved, list):
+    if not isinstance(retrieved, list):
         return None
-    qid = str(line_num)
+    if not retrieved:
+        return []  # Valid line with no results (e.g. retrieval timed out)
+    qid = qid_override if qid_override is not None else str(line_num)
     out = []
     for item in retrieved:
         if not isinstance(item, dict):
@@ -199,7 +303,12 @@ def parse_run_line(line: str) -> Tuple[str, str, float, str]:
     return None
 
 
-def preprocess_run(input_path: str, output_path: str, default_run_name: str = "run"):
+def preprocess_run(
+    input_path: str,
+    output_path: str,
+    default_run_name: str = "run",
+    test_queries_path: Optional[str] = None,
+):
     """
     Preprocess run file to TREC format.
     
@@ -207,7 +316,16 @@ def preprocess_run(input_path: str, output_path: str, default_run_name: str = "r
         input_path: Path to input run file
         output_path: Path to output TREC run file
         default_run_name: Default run name if not found in input
+        test_queries_path: Optional path to a test queries file whose IDs
+            replace the 1-based line numbers used for ReasonIR runs
+            (required for LIMIT / LIMIT+ to get correct query IDs).
     """
+    # Load query IDs from test file if provided (for LIMIT / LIMIT+)
+    query_ids: Optional[List[str]] = None
+    if test_queries_path:
+        query_ids = load_query_ids(test_queries_path)
+        print(f"[preprocess] Loaded {len(query_ids)} query IDs from: {test_queries_path}")
+
     # Load all results
     results: Dict[str, List[Tuple[str, float, str]]] = defaultdict(list)
     
@@ -234,7 +352,11 @@ def preprocess_run(input_path: str, output_path: str, default_run_name: str = "r
     with open(input_path, "r", encoding="utf-8") as infile:
         for line_num, line in enumerate(infile, start=1):
             if is_reasonir:
-                parsed_list = parse_reasonir_jsonl_line(line, line_num)
+                # Use mapped query ID when a test-queries file was provided
+                qid_override = None
+                if query_ids is not None and line_num <= len(query_ids):
+                    qid_override = query_ids[line_num - 1]
+                parsed_list = parse_reasonir_jsonl_line(line, line_num, qid_override=qid_override)
                 if parsed_list is not None:
                     for qid, docid, score in parsed_list:
                         results[qid].append((docid, score, default_run_name))
@@ -316,6 +438,36 @@ def main():
         default="run",
         help="Run name to use if not found in input file",
     )
+    parser.add_argument(
+        "--test-queries",
+        type=str,
+        default=None,
+        help=(
+            "Path to a test queries file (JSONL) whose IDs replace 1-based "
+            "line numbers for ReasonIR runs.  Supports LIMIT format "
+            '({"_id": "query_0", ...}) and LIMIT+ format ({"id": 0, ...}).'
+        ),
+    )
+    parser.add_argument(
+        "--generate-qrels",
+        type=str,
+        default=None,
+        metavar="QRELS_OUT",
+        help=(
+            "Also generate a TREC qrels file at this path. Requires at least "
+            "one of --qrels-jsonl or --test-queries to supply relevance data."
+        ),
+    )
+    parser.add_argument(
+        "--qrels-jsonl",
+        type=str,
+        default=None,
+        help=(
+            "Path to a BEIR-style JSONL qrels file "
+            '({"query-id": ..., "corpus-id": ..., "score": ...}). '
+            "Used with --generate-qrels to convert to TREC format."
+        ),
+    )
     args = parser.parse_args()
     
     # If no output path provided, create one with _trec suffix
@@ -323,7 +475,17 @@ def main():
         base_path = os.path.splitext(args.input)[0]
         args.output = f"{base_path}_trec"
     
-    preprocess_run(args.input, args.output, args.run_name)
+    preprocess_run(args.input, args.output, args.run_name,
+                   test_queries_path=args.test_queries)
+
+    # Optionally generate TREC qrels
+    if args.generate_qrels:
+        generate_trec_qrels(
+            args.generate_qrels,
+            qrels_jsonl_path=args.qrels_jsonl,
+            test_queries_path=args.test_queries,
+        )
+
     print("[preprocess] Done.")
 
 
